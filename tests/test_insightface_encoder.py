@@ -180,3 +180,31 @@ def test_extract_landmarks_falls_back_to_kps() -> None:
 
     assert len(pts) == 5
     assert pts[0] == (10, 13)
+
+
+def test_analyze_face_returns_bbox_pose_and_landmarks() -> None:
+    class FakeFaceAnalysis:
+        def __init__(self, name: str, providers: list[str]) -> None:
+            del name, providers
+
+        def prepare(self, ctx_id: int, det_size: tuple[int, int]) -> None:
+            del ctx_id, det_size
+
+        def get(self, image: np.ndarray) -> list[FakeFace]:
+            del image
+            return [
+                FakeFace(
+                    det_score=0.88,
+                    bbox=[10.0, 20.0, 50.0, 80.0],
+                    landmark_2d_106=[[11.0, 21.0], [12.0, 22.0], [13.0, 23.0]],
+                )
+            ]
+
+    encoder = InsightFaceEncoder(face_analysis_factory=FakeFaceAnalysis)
+    image = np.full((32, 32, 3), 120, dtype=np.uint8)
+    detected = encoder.analyze_face(image, max_points=20)
+
+    assert detected is not None
+    assert detected.det_score == pytest.approx(0.88)
+    assert detected.bbox == (10.0, 20.0, 50.0, 80.0)
+    assert detected.landmarks[0] == (11, 21)

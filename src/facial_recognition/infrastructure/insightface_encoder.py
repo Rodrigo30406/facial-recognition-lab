@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import cv2
 import numpy as np
 
 from facial_recognition.domain.interfaces import FaceEncoder
+
+
+@dataclass(frozen=True)
+class DetectedFace:
+    bbox: tuple[float, float, float, float]
+    det_score: float
+    yaw: float | None
+    pitch: float | None
+    roll: float | None
+    landmarks: list[tuple[int, int]]
 
 
 class InsightFaceEncoder(FaceEncoder):
@@ -42,27 +53,32 @@ class InsightFaceEncoder(FaceEncoder):
         return embedding.tolist()
 
     def extract_landmarks(self, image: np.ndarray, max_points: int = 20) -> list[tuple[int, int]]:
+        detected = self.analyze_face(image=image, max_points=max_points)
+        if detected is None:
+            return []
+        return detected.landmarks
+
+    def analyze_face(self, image: np.ndarray, max_points: int = 106) -> DetectedFace | None:
         faces = self._app.get(image)
         if not faces:
-            return []
+            return None
 
         best_face = _pick_best_face(faces)
-        points = _read_attr(best_face, "landmark_2d_106")
-        if points is None:
-            points = _read_attr(best_face, "kps")
-        if points is None:
-            return []
-
-        arr = np.asarray(points, dtype=np.float32)
-        if arr.ndim != 2 or arr.shape[1] < 2 or arr.shape[0] == 0:
-            return []
-
-        limit = max(1, int(max_points))
-        if arr.shape[0] > limit:
-            indices = np.linspace(0, arr.shape[0] - 1, num=limit, dtype=int)
-            arr = arr[indices]
-
-        return [(int(round(x)), int(round(y))) for x, y in arr[:, :2]]
+        bbox_raw = _read_attr(best_face, "bbox", [0.0, 0.0, 0.0, 0.0])
+        bbox_vals = list(bbox_raw)[:4] if bbox_raw is not None else [0.0, 0.0, 0.0, 0.0]
+        bbox = tuple(float(v) for v in bbox_vals)
+        pose = _read_attr(best_face, "pose")
+        yaw, pitch, roll = _parse_pose(pose)
+        det_score = float(_read_attr(best_face, "det_score", 0.0))
+        landmarks = _extract_landmarks(best_face, max_points=max_points)
+        return DetectedFace(
+            bbox=bbox,
+            det_score=det_score,
+            yaw=yaw,
+            pitch=pitch,
+            roll=roll,
+            landmarks=landmarks,
+        )
 
 
 def _decode_image(image_bytes: bytes) -> np.ndarray:
@@ -100,6 +116,34 @@ def _extract_embedding(face: Any) -> np.ndarray:
     if vector.size == 0:
         raise ValueError("Empty embedding produced by InsightFace")
     return _l2_normalize(vector)
+
+
+def _extract_landmarks(face: Any, max_points: int) -> list[tuple[int, int]]:
+    points = _read_attr(face, "landmark_2d_106")
+    if points is None:
+        points = _read_attr(face, "kps")
+    if points is None:
+        return []
+
+    arr = np.asarray(points, dtype=np.float32)
+    if arr.ndim != 2 or arr.shape[1] < 2 or arr.shape[0] == 0:
+        return []
+
+    limit = max(1, int(max_points))
+    if arr.shape[0] > limit:
+        indices = np.linspace(0, arr.shape[0] - 1, num=limit, dtype=int)
+        arr = arr[indices]
+
+    return [(int(round(x)), int(round(y))) for x, y in arr[:, :2]]
+
+
+def _parse_pose(pose: Any) -> tuple[float | None, float | None, float | None]:
+    if pose is None:
+        return None, None, None
+    arr = np.asarray(pose, dtype=np.float32).reshape(-1)
+    if arr.size < 3:
+        return None, None, None
+    return float(arr[0]), float(arr[1]), float(arr[2])
 
 
 def _l2_normalize(vector: np.ndarray) -> np.ndarray:
