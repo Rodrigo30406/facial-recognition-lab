@@ -13,6 +13,30 @@ pip install -e ".[dev]"
 uvicorn facial_recognition.api.main:app --reload
 ```
 
+## Seleccion de encoder por entorno
+
+Por defecto el sistema usa `dummy`.
+
+Recomendado: usar `.env` local:
+
+```bash
+cp .env.example .env
+```
+
+Alternativa: variables de entorno directas:
+
+```bash
+export ENCODER_BACKEND=insightface
+export INSIGHTFACE_MODEL_NAME=buffalo_l
+export INSIGHTFACE_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider
+export INSIGHTFACE_CTX_ID=0
+export INSIGHTFACE_DET_SIZE=320x320
+export TEMPORAL_CONSISTENCY_ENABLED=true
+export TEMPORAL_MIN_CONSISTENT_FRAMES=3
+```
+
+Tambien se aceptan variables con prefijo `FACIAL_` (por ejemplo `FACIAL_ENCODER_BACKEND`).
+
 ## Benchmarks disponibles
 
 - `benchmarks/gpu_benchmark.py`
@@ -30,6 +54,12 @@ Con enrolamiento desde la ventana (tecla `e`):
 
 ```bash
 PYTHONPATH=src python scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice
+```
+
+Con landmarks visuales (overlay):
+
+```bash
+PYTHONPATH=src python scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --show-landmarks --landmarks-max-points 20
 ```
 
 Controles:
