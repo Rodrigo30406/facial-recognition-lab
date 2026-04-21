@@ -37,6 +37,25 @@ uvicorn facial_recognition.api.main:app --reload
 Tambien puedes usar variables de entorno directas (`ENCODER_BACKEND=...`) si prefieres no usar `.env`.
 
 La consistencia temporal se puede ajustar con `TEMPORAL_CONSISTENCY_ENABLED` y `TEMPORAL_MIN_CONSISTENT_FRAMES`.
+Para captura de datos guiada con quality gate y angulos, usa `--guided-enroll` en `scripts/run_camera_demo.py`.
+
+Despues de `pip install -e .`, puedes ejecutar scripts sin repetir `PYTHONPATH=src`:
+
+```bash
+python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice --guided-enroll --guided-preset strict
+```
+
+Saludo por voz opcional en deteccion:
+
+```bash
+python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --recognize-every 3 --voice-greet
+```
+
+Tambien puedes fijar defaults del demo en `.env` usando variables `DEMO_*` (ver `.env.example`) y correr solo:
+
+```bash
+python3 scripts/run_camera_demo.py
+```
 
 ## Endpoints base
 

@@ -182,5 +182,5 @@ Completar el sistema de reconocimiento facial 1:N con precision biometrica real,
 pytest -q
 python benchmarks/gpu_benchmark.py
 python benchmarks/insightface_benchmark.py
-PYTHONPATH=src python scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01
+python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01
 ```
