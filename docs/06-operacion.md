@@ -122,7 +122,7 @@ Comportamiento:
 Modo por flags:
 
 - `--voice-greet`
-- `--voice-backend auto|pyttsx3|spd-say|espeak`
+- `--voice-backend auto|chattts|pyttsx3|spd-say|espeak`
 
 Valores por config (`.env`):
 
@@ -137,7 +137,14 @@ Valores por config (`.env`):
 Ejemplo (modo por flags + valores desde `.env`):
 
 ```bash
-python3 scripts/run_camera_demo.py --voice-greet --voice-backend espeak
+python3 scripts/run_camera_demo.py --voice-greet --voice-backend chattts
+```
+
+Instalacion sugerida para ChatTTS:
+
+```bash
+pip install "ChatTTS @ git+https://github.com/2noise/ChatTTS.git"
+pip install sounddevice
 ```
 
 ## Runbook base

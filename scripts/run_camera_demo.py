@@ -17,8 +17,10 @@ import queue
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -156,6 +158,142 @@ class _Pyttsx3Speaker:
     def close(self) -> None:
         self._queue.put(None)
         self._thread.join(timeout=1.0)
+
+
+class _ChatTTSSpeaker:
+    def __init__(self, voice_seed: int | None = None) -> None:
+        self._voice_seed = voice_seed
+        self._queue: queue.SimpleQueue[str | None] = queue.SimpleQueue()
+        self._ready = threading.Event()
+        self._failed = False
+        self._thread = threading.Thread(target=self._run, name="chattts-speaker", daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=20.0)
+
+    def _run(self) -> None:
+        try:
+            import ChatTTS
+            import torch
+        except Exception:
+            self._failed = True
+            self._ready.set()
+            return
+
+        sounddevice = None
+        try:
+            import sounddevice as sd  # type: ignore
+
+            sounddevice = sd
+        except Exception:
+            sounddevice = None
+
+        player = None if sounddevice is not None else _detect_audio_player()
+        if sounddevice is None and player is None:
+            self._failed = True
+            self._ready.set()
+            return
+
+        try:
+            if self._voice_seed is not None:
+                torch.manual_seed(int(self._voice_seed))
+
+            chat = ChatTTS.Chat()
+            chat.load(compile=False)
+            speaker_emb = chat.sample_random_speaker()
+            infer_params = ChatTTS.Chat.InferCodeParams(
+                spk_emb=speaker_emb,
+            )
+        except Exception:
+            self._failed = True
+            self._ready.set()
+            return
+
+        self._ready.set()
+        while True:
+            message = self._queue.get()
+            if message is None:
+                break
+            try:
+                wavs = chat.infer(
+                    [message],
+                    params_infer_code=infer_params,
+                )
+                if not wavs:
+                    continue
+                audio = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
+                _play_audio(
+                    audio=audio,
+                    sample_rate=24000,
+                    sounddevice=sounddevice,
+                    player=player,
+                )
+            except Exception:
+                continue
+
+    def enqueue(self, message: str) -> bool:
+        if self._failed:
+            return False
+        self._queue.put(message)
+        return True
+
+    def close(self) -> None:
+        self._queue.put(None)
+        self._thread.join(timeout=1.0)
+
+
+def _detect_audio_player() -> list[str] | None:
+    if shutil.which("paplay"):
+        return ["paplay"]
+    if shutil.which("aplay"):
+        return ["aplay"]
+    if shutil.which("ffplay"):
+        return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
+    return None
+
+
+def _play_audio(
+    audio: np.ndarray,
+    sample_rate: int,
+    sounddevice: Any | None,
+    player: list[str] | None,
+) -> None:
+    if sounddevice is not None:
+        try:
+            sounddevice.play(audio, sample_rate, blocking=True)
+            sounddevice.stop()
+            return
+        except Exception:
+            pass
+
+    if player is None:
+        return
+
+    clipped = np.clip(audio, -1.0, 1.0)
+    pcm16 = (clipped * 32767.0).astype(np.int16)
+
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+            tmp_path = tmp_file.name
+
+        with wave.open(tmp_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(pcm16.tobytes())
+
+        subprocess.run(
+            [*player, tmp_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    finally:
+        if tmp_path:
+            try:
+                Path(tmp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 @dataclass(frozen=True)
@@ -308,7 +446,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--voice-backend",
-        choices=("auto", "pyttsx3", "spd-say", "espeak"),
+        choices=("auto", "pyttsx3", "spd-say", "espeak", "chattts"),
         default="auto",
         help="TTS backend to use when --voice-greet is enabled",
     )
@@ -671,9 +809,9 @@ def _to_guided_preset(raw: str) -> str:
 
 def _to_voice_backend(raw: str) -> str:
     value = raw.strip().lower()
-    allowed = {"auto", "pyttsx3", "spd-say", "espeak"}
+    allowed = {"auto", "pyttsx3", "spd-say", "espeak", "chattts"}
     if value not in allowed:
-        raise ValueError("DEMO_VOICE_BACKEND must be one of: auto, pyttsx3, spd-say, espeak")
+        raise ValueError("DEMO_VOICE_BACKEND must be one of: auto, pyttsx3, spd-say, espeak, chattts")
     return value
 
 
@@ -733,7 +871,7 @@ def main() -> None:
         if voice_backend is not None:
             print(f"- Voice greet enabled ({voice_backend.kind})")
         else:
-            print("- Voice greet enabled but no TTS backend found (pyttsx3/spd-say/espeak)")
+            print("- Voice greet enabled but no TTS backend found (pyttsx3/spd-say/espeak/chattts)")
 
     state = DisplayState()
     frame_idx = 0
@@ -828,6 +966,8 @@ def _build_voice_backend(args: argparse.Namespace) -> VoiceBackend | None:
     if selected == "auto":
         if _can_import_pyttsx3():
             selected = "pyttsx3"
+        elif _can_import_chattts():
+            selected = "chattts"
         elif shutil.which("spd-say"):
             selected = "spd-say"
         elif shutil.which("espeak"):
@@ -859,12 +999,30 @@ def _build_voice_backend(args: argparse.Namespace) -> VoiceBackend | None:
             return VoiceBackend(kind="espeak", engine={"lang": args.voice_lang})
         return None
 
+    if selected == "chattts":
+        try:
+            speaker = _ChatTTSSpeaker()
+            if speaker._failed:
+                return None
+            return VoiceBackend(kind="chattts", engine=speaker)
+        except Exception:
+            return None
+
     return None
 
 
 def _can_import_pyttsx3() -> bool:
     try:
         import pyttsx3  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _can_import_chattts() -> bool:
+    try:
+        import ChatTTS  # noqa: F401
 
         return True
     except Exception:
@@ -904,7 +1062,7 @@ def _handle_voice_greeting(
         if voice_backend is None:
             if not greeting_state.backend_warning_shown:
                 greeting_state.backend_warning_shown = True
-                state.message = "Voice greet: instala pyttsx3 o espeak/spd-say"
+                state.message = "Voice greet: instala pyttsx3, espeak/spd-say o ChatTTS"
                 state.message_until_ts = time.time() + 3.0
             greeting_state.greeted_in_presence = True
             greeting_state.last_greet_ts_by_person[person_id] = now
@@ -949,6 +1107,10 @@ def _speak_message(backend: VoiceBackend, message: str) -> bool:
             if not isinstance(backend.engine, _Pyttsx3Speaker):
                 return False
             return backend.engine.enqueue(message)
+        if backend.kind == "chattts":
+            if not isinstance(backend.engine, _ChatTTSSpeaker):
+                return False
+            return backend.engine.enqueue(message)
         if backend.kind == "spd-say":
             lang = None
             if isinstance(backend.engine, dict):
@@ -985,9 +1147,10 @@ def _speak_message(backend: VoiceBackend, message: str) -> bool:
 def _close_voice_backend(backend: VoiceBackend | None) -> None:
     if backend is None:
         return
-    if backend.kind != "pyttsx3":
+    if backend.kind == "pyttsx3" and isinstance(backend.engine, _Pyttsx3Speaker):
+        backend.engine.close()
         return
-    if isinstance(backend.engine, _Pyttsx3Speaker):
+    if backend.kind == "chattts" and isinstance(backend.engine, _ChatTTSSpeaker):
         backend.engine.close()
 
 

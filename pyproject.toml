@@ -14,6 +14,8 @@ dependencies = [
   "uvicorn[standard]",
   "python-multipart",
   "pyttsx3",
+  "sounddevice",
+  "ChatTTS @ git+https://github.com/2noise/ChatTTS.git",
   "pydantic>=2",
   "numpy<2.0",
   "opencv-python",
