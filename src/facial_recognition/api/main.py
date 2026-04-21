@@ -93,7 +93,9 @@ async def recognize_face(
     notes: str | None = Form(default=None),
 ) -> RecognitionMatchResponse:
     payload = await image.read()
-    result = services.recognition_service.recognize(payload)
+    raw = services.recognition_service.recognize(payload)
+    stream_id = _recognition_stream_id(camera_id=camera_id, track_id=track_id)
+    result = services.recognition_consistency_service.stabilize(raw, stream_id=stream_id)
     services.recognition_event_service.record_from_result(
         result=result,
         camera_id=camera_id,
@@ -114,6 +116,16 @@ async def recognize_face(
         top1=as_candidate(result.top1),
         top2=as_candidate(result.top2),
     )
+
+
+def _recognition_stream_id(camera_id: str | None, track_id: str | None) -> str:
+    if camera_id and track_id:
+        return f"{camera_id}::{track_id}"
+    if camera_id:
+        return f"{camera_id}::_"
+    if track_id:
+        return f"_::{track_id}"
+    return "_default"
 
 
 @app.get("/v1/events", response_model=list[RecognitionEventResponse])
