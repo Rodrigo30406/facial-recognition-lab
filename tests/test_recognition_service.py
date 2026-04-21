@@ -15,6 +15,11 @@ class MapEncoder:
         return self._mapping[image_bytes]
 
 
+class FailingEncoder:
+    def encode(self, image_bytes: bytes) -> list[float]:
+        raise ValueError("No face detected in image payload")
+
+
 @pytest.fixture()
 def require_faiss() -> None:
     pytest.importorskip("faiss")
@@ -70,6 +75,24 @@ def test_recognition_unknown_when_below_threshold(require_faiss: None) -> None:
         face_repository=repo,
         searcher=FaissSearcher(),
         settings=Settings(recognition_threshold=0.8, recognition_margin=0.05, recognition_top_k=2),
+    )
+
+    result = service.recognize(b"probe")
+
+    assert result.decision == "unknown_person"
+    assert result.matched is False
+    assert result.person_id is None
+
+
+def test_recognition_unknown_when_no_face_detected(require_faiss: None) -> None:
+    repo = InMemoryFaceRepository()
+    repo.upsert(FaceRecord(person_id="alice", embedding=[1.0, 0.0, 0.0]))
+
+    service = RecognitionService(
+        encoder=FailingEncoder(),
+        face_repository=repo,
+        searcher=FaissSearcher(),
+        settings=Settings(recognition_threshold=0.5, recognition_margin=0.05, recognition_top_k=2),
     )
 
     result = service.recognize(b"probe")

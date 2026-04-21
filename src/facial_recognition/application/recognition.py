@@ -20,7 +20,18 @@ class RecognitionService:
         self._settings = settings
 
     def recognize(self, image_bytes: bytes) -> RecognitionResult:
-        probe = self._encoder.encode(image_bytes)
+        try:
+            probe = self._encoder.encode(image_bytes)
+        except ValueError:
+            # Common operational case: no face found in the frame.
+            # Treat as unknown instead of crashing the caller loop.
+            return RecognitionResult(
+                decision="unknown_person",
+                matched=False,
+                person_id=None,
+                top1=None,
+                top2=None,
+            )
         gallery = self._face_repository.list_all()
         if not gallery:
             return RecognitionResult(
