@@ -25,6 +25,19 @@ pip install -e .
 uvicorn facial_recognition.api.main:app --reload
 ```
 
+Para usar encoder real con InsightFace sin cambiar codigo:
+
+```bash
+# opcion recomendada: .env
+cp .env.example .env
+# edita .env si necesitas ajustar providers/det_size
+uvicorn facial_recognition.api.main:app --reload
+```
+
+Tambien puedes usar variables de entorno directas (`ENCODER_BACKEND=...`) si prefieres no usar `.env`.
+
+La consistencia temporal se puede ajustar con `TEMPORAL_CONSISTENCY_ENABLED` y `TEMPORAL_MIN_CONSISTENT_FRAMES`.
+
 ## Endpoints base
 
 - `GET /health`

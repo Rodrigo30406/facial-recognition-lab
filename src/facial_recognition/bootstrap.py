@@ -4,6 +4,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from facial_recognition.application.consistency import RecognitionConsistencyService
 from facial_recognition.application.enrollment import EnrollmentService
 from facial_recognition.application.events import RecognitionEventService
 from facial_recognition.application.persons import PersonService
@@ -11,6 +12,7 @@ from facial_recognition.application.recognition import RecognitionService
 from facial_recognition.application.services import FaceRecognitionService
 from facial_recognition.config import Settings
 from facial_recognition.infrastructure.dummy_encoder import DummyFaceEncoder
+from facial_recognition.infrastructure.insightface_encoder import InsightFaceEncoder
 from facial_recognition.infrastructure.faiss_search import FaissSearcher
 from facial_recognition.infrastructure.sqlalchemy_models import Base
 from facial_recognition.infrastructure.sqlite_repos import (
@@ -27,11 +29,12 @@ class ServiceContainer:
     person_service: PersonService
     enrollment_service: EnrollmentService
     recognition_service: RecognitionService
+    recognition_consistency_service: RecognitionConsistencyService
     recognition_event_service: RecognitionEventService
 
 
 def build_services(settings: Settings | None = None) -> ServiceContainer:
-    cfg = settings or Settings()
+    cfg = settings or Settings.from_env()
     _prepare_sqlite_path(cfg.database_url)
     Path(cfg.sample_storage_dir).mkdir(parents=True, exist_ok=True)
 
@@ -39,7 +42,7 @@ def build_services(settings: Settings | None = None) -> ServiceContainer:
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
 
-    encoder = DummyFaceEncoder()
+    encoder = _build_encoder(cfg)
     person_repo = SQLitePersonRepository(session_factory)
     face_repo = SQLiteFaceRepository(session_factory)
     sample_repo = SQLiteFaceSampleRepository(session_factory)
@@ -60,12 +63,17 @@ def build_services(settings: Settings | None = None) -> ServiceContainer:
         searcher=FaissSearcher(),
         settings=cfg,
     )
+    recognition_consistency_service = RecognitionConsistencyService(
+        enabled=cfg.temporal_consistency_enabled,
+        min_consistent_frames=cfg.temporal_min_consistent_frames,
+    )
     recognition_event_service = RecognitionEventService(repository=event_repo)
     return ServiceContainer(
         face_service=face_service,
         person_service=person_service,
         enrollment_service=enrollment_service,
         recognition_service=recognition_service,
+        recognition_consistency_service=recognition_consistency_service,
         recognition_event_service=recognition_event_service,
     )
 
@@ -79,3 +87,17 @@ def _prepare_sqlite_path(database_url: str) -> None:
         return
     db_path = Path(raw_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _build_encoder(cfg: Settings) -> DummyFaceEncoder | InsightFaceEncoder:
+    backend = cfg.encoder_backend.strip().lower()
+    if backend == "dummy":
+        return DummyFaceEncoder()
+    if backend == "insightface":
+        return InsightFaceEncoder(
+            model_name=cfg.insightface_model_name,
+            providers=cfg.insightface_providers,
+            ctx_id=cfg.insightface_ctx_id,
+            det_size=cfg.insightface_det_size,
+        )
+    raise ValueError(f"Unsupported encoder_backend '{cfg.encoder_backend}'")
