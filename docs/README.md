@@ -12,6 +12,7 @@ Este directorio organiza la documentacion operativa y tecnica del sistema de rec
 - [06-operacion.md](06-operacion.md)
 - [07-seguridad-privacidad.md](07-seguridad-privacidad.md)
 - [08-pruebas-metricas.md](08-pruebas-metricas.md)
+- [09-roadmap-ejecucion.md](09-roadmap-ejecucion.md)
 - [sprints.md](sprints.md)
 
 ## Fuente de decisiones
