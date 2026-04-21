@@ -7,6 +7,10 @@ torchaudio==2.11.0+cu128
 
 onnxruntime-gpu
 insightface
+faiss-cpu
+sqlalchemy
+ultralytics
+loguru
 numpy<2.0
 opencv-python
 pillow
