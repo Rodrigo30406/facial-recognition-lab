@@ -12,6 +12,7 @@ authors = [{ name = "odt063" }]
 dependencies = [
   "fastapi",
   "uvicorn[standard]",
+  "python-multipart",
   "pydantic>=2",
   "numpy<2.0",
   "opencv-python",
