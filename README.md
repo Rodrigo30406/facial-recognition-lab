@@ -7,7 +7,7 @@ Arquitectura limpia y reusable para construir pipelines de facial recognition si
 - `src/eleccia_vision/domain`: entidades y contratos puros.
 - `src/eleccia_vision/application`: casos de uso/orquestacion.
 - `src/eleccia_vision/infrastructure`: adaptadores concretos (encoder, repositorio).
-- `src/eleccia_vision/api`: endpoints HTTP (FastAPI).
+- `src/eleccia_core`: orquestacion general y API HTTP (FastAPI).
 - `src/eleccia_voice`: modulo de voz reutilizable para saludos y futuras skills.
 - `tests`: pruebas unitarias y de integracion.
 - `docs`: documentacion estandar del proyecto.
@@ -23,7 +23,7 @@ Arquitectura limpia y reusable para construir pipelines de facial recognition si
 
 ```bash
 pip install -e .
-uvicorn eleccia_vision.api.main:app --reload
+uvicorn eleccia_core.api.main:app --reload
 ```
 
 Para usar encoder real con InsightFace sin cambiar codigo:
@@ -32,10 +32,22 @@ Para usar encoder real con InsightFace sin cambiar codigo:
 # opcion recomendada: .env
 cp .env.example .env
 # edita .env si necesitas ajustar providers/det_size
-uvicorn eleccia_vision.api.main:app --reload
+uvicorn eleccia_core.api.main:app --reload
 ```
 
 Tambien puedes usar variables de entorno directas (`ENCODER_BACKEND=...`) si prefieres no usar `.env`.
+
+## Arranque Embebido (Auto-identificacion)
+
+Si quieres que al levantar el proceso API arranque tambien identificacion por camara:
+
+```bash
+export ELECCIA_AUTO_START_IDENTIFICATION=true
+export ELECCIA_IDENTIFICATION_ARGS="--camera-index 0 --camera-id cam-01 --recognize-every 3 --voice-greet --voice-backend melotts"
+uvicorn eleccia_core.api.main:app
+```
+
+Tambien puedes usar `ELECCIA_IDENTIFICATION_CMD` para definir un comando completo.
 
 La consistencia temporal se puede ajustar con `TEMPORAL_CONSISTENCY_ENABLED` y `TEMPORAL_MIN_CONSISTENT_FRAMES`.
 Para captura de datos guiada con quality gate y angulos, usa `--guided-enroll` en `scripts/run_camera_demo.py`.

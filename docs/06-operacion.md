@@ -10,8 +10,23 @@
 
 ```bash
 pip install -e ".[dev]"
-uvicorn eleccia_vision.api.main:app --reload
+uvicorn eleccia_core.api.main:app --reload
 ```
+
+## Arranque embebido (auto-identificacion)
+
+Para que el proceso API inicie tambien el modulo de identificacion al arrancar:
+
+```bash
+export ELECCIA_AUTO_START_IDENTIFICATION=true
+export ELECCIA_IDENTIFICATION_ARGS="--camera-index 0 --camera-id cam-01 --recognize-every 3 --voice-greet --voice-backend melotts"
+uvicorn eleccia_core.api.main:app
+```
+
+Opcional:
+
+- `ELECCIA_IDENTIFICATION_CMD`: comando completo para reemplazar el launcher default.
+- `ELECCIA_IDENTIFICATION_ARGS`: argumentos extra para `scripts/run_camera_demo.py`.
 
 ## Config fija para demo (.env)
 
@@ -122,7 +137,7 @@ Comportamiento:
 Modo por flags:
 
 - `--voice-greet`
-- `--voice-backend auto|melotts|chattts|pyttsx3|spd-say|espeak`
+- `--voice-backend auto|melotts|pyttsx3|spd-say|espeak`
 
 Valores por config (`.env`):
 
