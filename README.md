@@ -4,10 +4,11 @@ Arquitectura limpia y reusable para construir pipelines de facial recognition si
 
 ## Estructura
 
-- `src/facial_recognition/domain`: entidades y contratos puros.
-- `src/facial_recognition/application`: casos de uso/orquestacion.
-- `src/facial_recognition/infrastructure`: adaptadores concretos (encoder, repositorio).
-- `src/facial_recognition/api`: endpoints HTTP (FastAPI).
+- `src/eleccia_vision/domain`: entidades y contratos puros.
+- `src/eleccia_vision/application`: casos de uso/orquestacion.
+- `src/eleccia_vision/infrastructure`: adaptadores concretos (encoder, repositorio).
+- `src/eleccia_vision/api`: endpoints HTTP (FastAPI).
+- `src/eleccia_voice`: modulo de voz reutilizable para saludos y futuras skills.
 - `tests`: pruebas unitarias y de integracion.
 - `docs`: documentacion estandar del proyecto.
 
@@ -22,7 +23,7 @@ Arquitectura limpia y reusable para construir pipelines de facial recognition si
 
 ```bash
 pip install -e .
-uvicorn facial_recognition.api.main:app --reload
+uvicorn eleccia_vision.api.main:app --reload
 ```
 
 Para usar encoder real con InsightFace sin cambiar codigo:
@@ -31,7 +32,7 @@ Para usar encoder real con InsightFace sin cambiar codigo:
 # opcion recomendada: .env
 cp .env.example .env
 # edita .env si necesitas ajustar providers/det_size
-uvicorn facial_recognition.api.main:app --reload
+uvicorn eleccia_vision.api.main:app --reload
 ```
 
 Tambien puedes usar variables de entorno directas (`ENCODER_BACKEND=...`) si prefieres no usar `.env`.

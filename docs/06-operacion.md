@@ -10,7 +10,7 @@
 
 ```bash
 pip install -e ".[dev]"
-uvicorn facial_recognition.api.main:app --reload
+uvicorn eleccia_vision.api.main:app --reload
 ```
 
 ## Config fija para demo (.env)
@@ -56,7 +56,7 @@ Tambien se aceptan variables con prefijo `FACIAL_` (por ejemplo `FACIAL_ENCODER_
 ## Demo con camara
 
 ```bash
-cd /home/odt063/JNE/facial_recognition
+cd /home/labia10/Documentos/JNE/eleccia-asistente-virtual
 conda activate face-lab
 pip install -e ".[dev]"
 python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01
