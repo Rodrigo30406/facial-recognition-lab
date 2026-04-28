@@ -347,3 +347,79 @@ def test_voice_assistant_unknown_is_tracked_independently_per_presence_id() -> N
     assert msg1 == "Saludo: Hola, bienvenido al laboratorio de IA"
     assert msg2 is None
     assert msg3 == "Saludo: Hola, bienvenido al laboratorio de IA"
+
+
+def test_voice_assistant_known_is_tracked_independently_per_presence_id() -> None:
+    assistant = VoiceAssistant(
+        VoiceSettings(
+            enabled=True,
+            backend="unsupported-backend",
+            template="Hola {name}",
+            absence_seconds=1.0,
+            reentry_delay_seconds=10.0,
+        )
+    )
+    assistant._backend = SimpleNamespace(kind="stub", engine=None)
+
+    with patch("eleccia_voice.assistant._speak_message", return_value=True):
+        msg1 = assistant.on_recognition(
+            _known("alice"),
+            resolve_person=lambda _person_id: ("Alice Doe", "female"),
+            now=50.0,
+            presence_id="track-a",
+        )
+        msg2 = assistant.on_recognition(
+            _known("bob"),
+            resolve_person=lambda _person_id: ("Bob Doe", "male"),
+            now=50.0,
+            presence_id="track-b",
+        )
+        msg3 = assistant.on_recognition(
+            _known("alice"),
+            resolve_person=lambda _person_id: ("Alice Doe", "female"),
+            now=50.2,
+            presence_id="track-a",
+        )
+        msg4 = assistant.on_recognition(
+            _known("bob"),
+            resolve_person=lambda _person_id: ("Bob Doe", "male"),
+            now=50.2,
+            presence_id="track-b",
+        )
+    assistant.close()
+
+    assert msg1 == "Saludo: Hola Alice Doe"
+    assert msg2 == "Saludo: Hola Bob Doe"
+    assert msg3 is None
+    assert msg4 is None
+
+
+def test_voice_assistant_regreet_marker_active_after_absence_timeout() -> None:
+    assistant = VoiceAssistant(
+        VoiceSettings(
+            enabled=True,
+            backend="unsupported-backend",
+            template="Hola {name}",
+            absence_seconds=1.0,
+            reentry_delay_seconds=0.0,
+        )
+    )
+    assistant._backend = SimpleNamespace(kind="stub", engine=None)
+
+    with patch("eleccia_voice.assistant._speak_message", return_value=True):
+        _ = assistant.on_recognition(
+            _known("alice"),
+            resolve_person=lambda _person_id: ("Alice Doe", "female"),
+            now=60.0,
+            presence_id="track-a",
+        )
+        _ = assistant.on_recognition(
+            RecognitionResult(decision="unknown_person", matched=False, person_id=None, top1=None, top2=None),
+            resolve_person=lambda _person_id: ("", None),
+            now=61.2,
+            presence_id="track-a",
+        )
+
+    armed = assistant.is_regreet_marker_active("track-a")
+    assistant.close()
+    assert armed is True

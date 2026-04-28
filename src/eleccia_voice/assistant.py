@@ -18,6 +18,7 @@ import numpy as np
 from eleccia_vision.domain.entities import RecognitionResult
 
 PersonMetadataResolver = Callable[[str], tuple[str, str | None]]
+KNOWN_PRESENCE_ID = "__known_presence__"
 UNKNOWN_PRESENCE_ID = "__unknown_presence__"
 DEFAULT_UNKNOWN_GREETING = "Hola, bienvenido al laboratorio de IA"
 
@@ -49,9 +50,10 @@ class VoiceSettings:
 
 @dataclass
 class GreetingState:
-    current_person_id: str | None = None
-    greeted_in_presence: bool = False
-    last_seen_ts: float = 0.0
+    known_presence_person_id: dict[str, str] = field(default_factory=dict)
+    known_presence_greeted: dict[str, bool] = field(default_factory=dict)
+    known_presence_last_seen_ts: dict[str, float] = field(default_factory=dict)
+    known_presence_regreet_armed: dict[str, bool] = field(default_factory=dict)
     last_greet_ts_by_person: dict[str, float] = field(default_factory=dict)
     unknown_presence_last_seen_ts: dict[str, float] = field(default_factory=dict)
     unknown_presence_greeted: dict[str, bool] = field(default_factory=dict)
@@ -79,6 +81,10 @@ class VoiceAssistant:
     def close(self) -> None:
         _close_voice_backend(self._backend)
 
+    def is_regreet_marker_active(self, presence_id: str | None) -> bool:
+        known_key = _build_known_presence_key(presence_id)
+        return bool(self._state.known_presence_regreet_armed.get(known_key, False))
+
     def speak(self, text: str) -> bool:
         message = str(text).strip()
         if not message:
@@ -101,7 +107,10 @@ class VoiceAssistant:
             return None
 
         ts = time.time() if now is None else now
+        known_presence_key = _build_known_presence_key(presence_id)
+        self._cleanup_stale_known_presences(now_ts=ts, keep_presence_key=known_presence_key)
         self._cleanup_stale_unknown_presences(now_ts=ts)
+        current_known_person_id = self._state.known_presence_person_id.get(known_presence_key)
         close_enough = _is_face_close_enough(
             face_ratio=face_ratio,
             pose_yaw=pose_yaw,
@@ -111,12 +120,12 @@ class VoiceAssistant:
 
         if result.decision == "known_person" and result.person_id is not None and close_enough:
             person_id = result.person_id
-            if self._state.current_person_id != person_id:
-                self._state.current_person_id = person_id
-                self._state.greeted_in_presence = False
-            self._state.last_seen_ts = ts
+            if current_known_person_id != person_id:
+                self._state.known_presence_person_id[known_presence_key] = person_id
+                self._state.known_presence_greeted[known_presence_key] = False
+            self._state.known_presence_last_seen_ts[known_presence_key] = ts
 
-            if self._state.greeted_in_presence:
+            if self._state.known_presence_greeted.get(known_presence_key, False):
                 return None
 
             min_delay = max(0.0, float(self._settings.reentry_delay_seconds))
@@ -133,7 +142,8 @@ class VoiceAssistant:
             )
 
             if self._backend is None:
-                self._state.greeted_in_presence = True
+                self._state.known_presence_greeted[known_presence_key] = True
+                self._state.known_presence_regreet_armed[known_presence_key] = False
                 self._state.last_greet_ts_by_person[person_id] = ts
                 if not self._state.backend_warning_shown:
                     self._state.backend_warning_shown = True
@@ -141,23 +151,24 @@ class VoiceAssistant:
                 return None
 
             if _speak_message(self._backend, message):
-                self._state.greeted_in_presence = True
+                self._state.known_presence_greeted[known_presence_key] = True
+                self._state.known_presence_regreet_armed[known_presence_key] = False
                 self._state.last_greet_ts_by_person[person_id] = ts
                 return f"Saludo: {message}"
             return None
 
         if _should_keep_known_presence_on_ambiguous(
             result=result,
-            current_person_id=self._state.current_person_id,
+            current_person_id=current_known_person_id,
             close_enough=close_enough,
         ):
-            self._state.last_seen_ts = ts
+            self._state.known_presence_last_seen_ts[known_presence_key] = ts
             return None
 
         if _is_unknown_face_detected(result, face_ratio=face_ratio) and close_enough:
             # If we were tracking a known person, unknown frames should not replace
             # that presence immediately; let absence timeout handle the reset.
-            if self._state.current_person_id not in {None, UNKNOWN_PRESENCE_ID}:
+            if current_known_person_id is not None:
                 pass
             else:
                 unknown_presence_key = _build_unknown_presence_key(presence_id)
@@ -188,14 +199,34 @@ class VoiceAssistant:
                     return f"Saludo: {message}"
                 return None
 
-        if self._state.current_person_id is None:
+        if current_known_person_id is None:
             return None
 
         absence_seconds = max(0.0, float(self._settings.absence_seconds))
-        if (ts - self._state.last_seen_ts) >= absence_seconds:
-            self._state.current_person_id = None
-            self._state.greeted_in_presence = False
+        last_seen = self._state.known_presence_last_seen_ts.get(known_presence_key, 0.0)
+        if (ts - last_seen) >= absence_seconds:
+            self._state.known_presence_person_id.pop(known_presence_key, None)
+            self._state.known_presence_greeted.pop(known_presence_key, None)
+            self._state.known_presence_last_seen_ts.pop(known_presence_key, None)
+            self._state.known_presence_regreet_armed[known_presence_key] = True
         return None
+
+    def _cleanup_stale_known_presences(self, now_ts: float, keep_presence_key: str | None = None) -> None:
+        absence_seconds = max(0.0, float(self._settings.absence_seconds))
+        if absence_seconds <= 0.0:
+            return
+
+        stale_keys = [
+            key
+            for key, last_seen in self._state.known_presence_last_seen_ts.items()
+            if key != keep_presence_key
+            if (now_ts - last_seen) >= absence_seconds
+        ]
+        for key in stale_keys:
+            self._state.known_presence_person_id.pop(key, None)
+            self._state.known_presence_greeted.pop(key, None)
+            self._state.known_presence_last_seen_ts.pop(key, None)
+            self._state.known_presence_regreet_armed[key] = True
 
     def _cleanup_stale_unknown_presences(self, now_ts: float) -> None:
         absence_seconds = max(0.0, float(self._settings.absence_seconds))
@@ -268,6 +299,15 @@ def _is_unknown_face_detected(result: RecognitionResult, face_ratio: float | Non
     if face_ratio is not None and float(face_ratio) > 0.0:
         return True
     return False
+
+
+def _build_known_presence_key(presence_id: str | None) -> str:
+    if presence_id is None:
+        return KNOWN_PRESENCE_ID
+    value = str(presence_id).strip()
+    if not value:
+        return KNOWN_PRESENCE_ID
+    return f"{KNOWN_PRESENCE_ID}::{value}"
 
 
 def _build_unknown_presence_key(presence_id: str | None) -> str:

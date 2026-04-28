@@ -37,7 +37,7 @@ from eleccia_vision.application.quality_gate import (
     evaluate_quality_gate,
 )
 from eleccia_core.bootstrap import build_services
-from eleccia_vision.domain.entities import RecognitionResult
+from eleccia_vision.domain.entities import RecognitionCandidate, RecognitionResult
 from eleccia_vision.infrastructure.insightface_encoder import DetectedFace
 from eleccia_voice import VoiceAssistant, build_voice_settings_from_args
 
@@ -71,6 +71,7 @@ class FaceOverlay:
     bbox: tuple[int, int, int, int]
     label: str
     in_range: bool
+    regreet_armed: bool
     face_ratio: float | None
     landmarks: list[tuple[int, int]]
 
@@ -857,11 +858,11 @@ def _run_recognition(
 
     for idx, face in enumerate(detected_faces):
         track_id = tracked_by_bbox.get(tuple(face.bbox), f"ephemeral-{idx}")
-        face_payload = _crop_face_to_jpeg_bytes(frame=frame, bbox=face.bbox)
-        if face_payload is None:
-            continue
-
-        raw = services.recognition_service.recognize(face_payload)
+        raw = _recognize_face_from_detection(
+            frame=frame,
+            face=face,
+            services=services,
+        )
         result = services.recognition_consistency_service.stabilize(
             raw,
             stream_id=f"{camera_id}::{track_id}",
@@ -891,15 +892,7 @@ def _run_recognition(
             face_ratio=face_ratio,
             min_face_ratio=min_face_ratio_for_label,
         )
-        state.face_overlays.append(
-            FaceOverlay(
-                bbox=bbox_int,
-                label=label,
-                in_range=in_range,
-                face_ratio=face_ratio,
-                landmarks=face.landmarks,
-            )
-        )
+        regreet_armed = False
 
         if is_trackable:
             voice_message = voice_assistant.on_recognition(
@@ -910,8 +903,20 @@ def _run_recognition(
                 pose_pitch=face.pitch,
                 presence_id=track_id,
             )
+            regreet_armed = voice_assistant.is_regreet_marker_active(track_id)
             if first_voice_message is None and voice_message is not None:
                 first_voice_message = voice_message
+
+        state.face_overlays.append(
+            FaceOverlay(
+                bbox=bbox_int,
+                label=label,
+                in_range=in_range,
+                regreet_armed=regreet_armed,
+                face_ratio=face_ratio,
+                landmarks=face.landmarks,
+            )
+        )
 
         area = _bbox_area(face.bbox)
         if primary_choice is None or area > primary_choice[0]:
@@ -947,6 +952,88 @@ def _run_recognition(
             state.message_until_ts = time.time() + 2.0
         else:
             state.message_until_ts = time.time() + 3.0
+
+
+def _recognize_face_from_detection(frame, face: DetectedFace, services) -> RecognitionResult:
+    if face.embedding:
+        return _recognize_from_probe_embedding(services=services, probe=face.embedding)
+
+    face_payload = _crop_face_to_jpeg_bytes(frame=frame, bbox=face.bbox)
+    if face_payload is None:
+        return RecognitionResult(
+            decision="unknown_person",
+            matched=False,
+            person_id=None,
+            top1=None,
+            top2=None,
+        )
+    return services.recognition_service.recognize(face_payload)
+
+
+def _recognize_from_probe_embedding(services, probe: list[float]) -> RecognitionResult:
+    recognition_service = services.recognition_service
+    gallery = recognition_service._face_repository.list_all()
+    if not gallery:
+        return RecognitionResult(
+            decision="unknown_person",
+            matched=False,
+            person_id=None,
+            top1=None,
+            top2=None,
+        )
+
+    ranked = recognition_service._searcher.search(
+        probe_embedding=probe,
+        candidates=gallery,
+        top_k=recognition_service._settings.recognition_top_k,
+    )
+    if not ranked:
+        return RecognitionResult(
+            decision="unknown_person",
+            matched=False,
+            person_id=None,
+            top1=None,
+            top2=None,
+        )
+
+    top1 = ranked[0]
+    top2 = ranked[1] if len(ranked) > 1 else None
+
+    if top1.score < recognition_service._settings.recognition_threshold:
+        return RecognitionResult(
+            decision="unknown_person",
+            matched=False,
+            person_id=None,
+            top1=top1,
+            top2=top2,
+        )
+
+    if _is_ambiguous_candidates(top1=top1, top2=top2, margin=recognition_service._settings.recognition_margin):
+        return RecognitionResult(
+            decision="ambiguous_match",
+            matched=False,
+            person_id=None,
+            top1=top1,
+            top2=top2,
+        )
+
+    return RecognitionResult(
+        decision="known_person",
+        matched=True,
+        person_id=top1.person_id,
+        top1=top1,
+        top2=top2,
+    )
+
+
+def _is_ambiguous_candidates(
+    top1: RecognitionCandidate,
+    top2: RecognitionCandidate | None,
+    margin: float,
+) -> bool:
+    if top2 is None:
+        return False
+    return (top1.score - top2.score) < margin
 
 
 def _resolve_person_metadata(services, person_id: str) -> tuple[str, str | None]:
@@ -1483,7 +1570,7 @@ def _draw_face_overlays(frame, overlays: list[FaceOverlay]) -> None:
     for overlay in overlays:
         _draw_landmarks(frame, overlay.landmarks)
         x1, y1, x2, y2 = overlay.bbox
-        color = _proximity_color(overlay.in_range)
+        color = _proximity_color(overlay.in_range, overlay.regreet_armed)
         y_text = max(18, y1 - 8)
         text = overlay.label
         if overlay.face_ratio is not None:
@@ -1508,8 +1595,8 @@ def _is_in_face_ratio_range(face_ratio: float | None, min_face_ratio: float) -> 
     return float(face_ratio) >= float(min_face_ratio)
 
 
-def _proximity_color(in_range: bool) -> tuple[int, int, int]:
-    if in_range:
+def _proximity_color(in_range: bool, regreet_armed: bool) -> tuple[int, int, int]:
+    if in_range and not regreet_armed:
         return (0, 255, 0)
     return (0, 0, 255)
 
