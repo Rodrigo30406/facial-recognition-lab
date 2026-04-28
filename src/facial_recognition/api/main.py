@@ -13,7 +13,7 @@ from facial_recognition.api.schemas import (
     RecognitionMatchResponse,
 )
 from facial_recognition.application.enrollment import InvalidImageError, PersonNotFoundError
-from facial_recognition.application.persons import PersonAlreadyExistsError
+from facial_recognition.application.persons import InvalidPersonSexError, PersonAlreadyExistsError
 from facial_recognition.bootstrap import build_services
 
 app = FastAPI(title="Facial Recognition API", version="0.1.0")
@@ -31,17 +31,20 @@ def create_person(payload: PersonCreateRequest) -> PersonResponse:
         person = services.person_service.create_person(
             person_id=payload.person_id,
             full_name=payload.full_name,
+            sex=payload.sex,
         )
     except PersonAlreadyExistsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except InvalidPersonSexError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    return PersonResponse(person_id=person.person_id, full_name=person.full_name)
+    return PersonResponse(person_id=person.person_id, full_name=person.full_name, sex=person.sex)
 
 
 @app.get("/v1/persons", response_model=list[PersonResponse])
 def list_people() -> list[PersonResponse]:
     people = services.person_service.list_people()
-    return [PersonResponse(person_id=p.person_id, full_name=p.full_name) for p in people]
+    return [PersonResponse(person_id=p.person_id, full_name=p.full_name, sex=p.sex) for p in people]
 
 
 @app.post("/v1/enrollments/image", response_model=EnrollmentImageResponse)

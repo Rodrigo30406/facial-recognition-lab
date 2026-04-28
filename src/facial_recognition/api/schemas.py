@@ -6,11 +6,13 @@ from pydantic import BaseModel, Field
 class PersonCreateRequest(BaseModel):
     person_id: str
     full_name: str
+    sex: str | None = None
 
 
 class PersonResponse(BaseModel):
     person_id: str
     full_name: str
+    sex: str | None = None
 
 
 class EnrollResponse(BaseModel):

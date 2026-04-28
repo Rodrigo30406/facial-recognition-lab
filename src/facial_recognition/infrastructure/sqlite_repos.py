@@ -33,7 +33,13 @@ class SQLitePersonRepository(PersonRepository):
             existing = session.get(PersonModel, person.person_id)
             if existing is not None:
                 return False
-            session.add(PersonModel(person_id=person.person_id, full_name=person.full_name))
+            session.add(
+                PersonModel(
+                    person_id=person.person_id,
+                    full_name=person.full_name,
+                    sex=person.sex,
+                )
+            )
             session.commit()
             return True
 
@@ -42,12 +48,12 @@ class SQLitePersonRepository(PersonRepository):
             row = session.get(PersonModel, person_id)
             if row is None:
                 return None
-            return PersonRecord(person_id=row.person_id, full_name=row.full_name)
+            return PersonRecord(person_id=row.person_id, full_name=row.full_name, sex=row.sex)
 
     def list_all(self) -> list[PersonRecord]:
         with self._session_factory() as session:
             rows = session.scalars(select(PersonModel).order_by(PersonModel.created_at.asc())).all()
-            return [PersonRecord(person_id=r.person_id, full_name=r.full_name) for r in rows]
+            return [PersonRecord(person_id=r.person_id, full_name=r.full_name, sex=r.sex) for r in rows]
 
 
 class SQLiteFaceRepository(FaceRepository):

@@ -19,6 +19,7 @@ class MatchResult:
 class PersonRecord:
     person_id: str
     full_name: str
+    sex: str | None = None
 
 
 @dataclass(frozen=True)

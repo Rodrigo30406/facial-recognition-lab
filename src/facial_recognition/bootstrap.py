@@ -40,6 +40,7 @@ def build_services(settings: Settings | None = None) -> ServiceContainer:
 
     engine = create_engine(cfg.database_url, future=True)
     Base.metadata.create_all(engine)
+    _apply_sqlite_compat_migrations(engine=engine, database_url=cfg.database_url)
     session_factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
 
     encoder = _build_encoder(cfg)
@@ -87,6 +88,20 @@ def _prepare_sqlite_path(database_url: str) -> None:
         return
     db_path = Path(raw_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
+
+
+def _apply_sqlite_compat_migrations(*, engine, database_url: str) -> None:
+    if not database_url.startswith("sqlite:///"):
+        return
+
+    with engine.begin() as conn:
+        rows = conn.exec_driver_sql("PRAGMA table_info(persons)").fetchall()
+        if not rows:
+            return
+
+        columns = {str(row[1]) for row in rows if len(row) > 1}
+        if "sex" not in columns:
+            conn.exec_driver_sql("ALTER TABLE persons ADD COLUMN sex VARCHAR(16)")
 
 
 def _build_encoder(cfg: Settings) -> DummyFaceEncoder | InsightFaceEncoder:

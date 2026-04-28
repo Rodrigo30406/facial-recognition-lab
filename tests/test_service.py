@@ -1,4 +1,8 @@
-from facial_recognition.application.persons import PersonAlreadyExistsError, PersonService
+from facial_recognition.application.persons import (
+    InvalidPersonSexError,
+    PersonAlreadyExistsError,
+    PersonService,
+)
 from facial_recognition.application.services import FaceRecognitionService
 from facial_recognition.config import Settings
 from facial_recognition.infrastructure.dummy_encoder import DummyFaceEncoder
@@ -26,10 +30,11 @@ def test_person_service_create_and_list() -> None:
     service = PersonService(repository=InMemoryPersonRepository())
 
     service.create_person("alice", "Alice Doe")
-    service.create_person("bob", "Bob Roe")
+    service.create_person("bob", "Bob Roe", sex="femenino")
     people = service.list_people()
 
     assert [p.person_id for p in people] == ["alice", "bob"]
+    assert [p.sex for p in people] == [None, "female"]
 
 
 def test_person_service_duplicate_person() -> None:
@@ -42,3 +47,14 @@ def test_person_service_duplicate_person() -> None:
         return
 
     raise AssertionError("Expected PersonAlreadyExistsError")
+
+
+def test_person_service_invalid_sex() -> None:
+    service = PersonService(repository=InMemoryPersonRepository())
+
+    try:
+        service.create_person("alice", "Alice Doe", sex="desconocido")
+    except InvalidPersonSexError:
+        return
+
+    raise AssertionError("Expected InvalidPersonSexError")
