@@ -43,7 +43,6 @@ class VoiceSettings:
     melo_speaker: str | None = None
     melo_speed: float | None = None
     melo_device: str | None = None
-    chattts_seed: int | None = None
     unknown_greeting: str = DEFAULT_UNKNOWN_GREETING
     min_face_ratio_for_greeting: float = 0.0
 
@@ -54,6 +53,8 @@ class GreetingState:
     greeted_in_presence: bool = False
     last_seen_ts: float = 0.0
     last_greet_ts_by_person: dict[str, float] = field(default_factory=dict)
+    unknown_presence_last_seen_ts: dict[str, float] = field(default_factory=dict)
+    unknown_presence_greeted: dict[str, bool] = field(default_factory=dict)
     person_name_cache: dict[str, str] = field(default_factory=dict)
     person_sex_cache: dict[str, str | None] = field(default_factory=dict)
     backend_warning_shown: bool = False
@@ -94,11 +95,13 @@ class VoiceAssistant:
         pose_yaw: float | None = None,
         pose_pitch: float | None = None,
         now: float | None = None,
+        presence_id: str | None = None,
     ) -> str | None:
         if not self._settings.enabled:
             return None
 
         ts = time.time() if now is None else now
+        self._cleanup_stale_unknown_presences(now_ts=ts)
         close_enough = _is_face_close_enough(
             face_ratio=face_ratio,
             pose_yaw=pose_yaw,
@@ -134,45 +137,56 @@ class VoiceAssistant:
                 self._state.last_greet_ts_by_person[person_id] = ts
                 if not self._state.backend_warning_shown:
                     self._state.backend_warning_shown = True
-                    return "Voice greet: instala pyttsx3, espeak/spd-say o ChatTTS"
+                    return "Voice greet: instala MeloTTS, pyttsx3, espeak o spd-say"
                 return None
 
             if _speak_message(self._backend, message):
                 self._state.greeted_in_presence = True
                 self._state.last_greet_ts_by_person[person_id] = ts
                 return f"Saludo: {message}"
+            return None
+
+        if _should_keep_known_presence_on_ambiguous(
+            result=result,
+            current_person_id=self._state.current_person_id,
+            close_enough=close_enough,
+        ):
+            self._state.last_seen_ts = ts
             return None
 
         if _is_unknown_face_detected(result, face_ratio=face_ratio) and close_enough:
-            person_id = UNKNOWN_PRESENCE_ID
-            if self._state.current_person_id != person_id:
-                self._state.current_person_id = person_id
-                self._state.greeted_in_presence = False
-            self._state.last_seen_ts = ts
+            # If we were tracking a known person, unknown frames should not replace
+            # that presence immediately; let absence timeout handle the reset.
+            if self._state.current_person_id not in {None, UNKNOWN_PRESENCE_ID}:
+                pass
+            else:
+                unknown_presence_key = _build_unknown_presence_key(presence_id)
+                self._state.unknown_presence_last_seen_ts[unknown_presence_key] = ts
+                greeted = self._state.unknown_presence_greeted.get(unknown_presence_key, False)
 
-            if self._state.greeted_in_presence:
+                if greeted:
+                    return None
+
+                min_delay = max(0.0, float(self._settings.reentry_delay_seconds))
+                last_greet = self._state.last_greet_ts_by_person.get(unknown_presence_key, 0.0)
+                if (ts - last_greet) < min_delay:
+                    return None
+
+                message = (self._settings.unknown_greeting or "").strip() or DEFAULT_UNKNOWN_GREETING
+
+                if self._backend is None:
+                    self._state.unknown_presence_greeted[unknown_presence_key] = True
+                    self._state.last_greet_ts_by_person[unknown_presence_key] = ts
+                    if not self._state.backend_warning_shown:
+                        self._state.backend_warning_shown = True
+                        return "Voice greet: instala MeloTTS, pyttsx3, espeak o spd-say"
+                    return None
+
+                if _speak_message(self._backend, message):
+                    self._state.unknown_presence_greeted[unknown_presence_key] = True
+                    self._state.last_greet_ts_by_person[unknown_presence_key] = ts
+                    return f"Saludo: {message}"
                 return None
-
-            min_delay = max(0.0, float(self._settings.reentry_delay_seconds))
-            last_greet = self._state.last_greet_ts_by_person.get(person_id, 0.0)
-            if (ts - last_greet) < min_delay:
-                return None
-
-            message = (self._settings.unknown_greeting or "").strip() or DEFAULT_UNKNOWN_GREETING
-
-            if self._backend is None:
-                self._state.greeted_in_presence = True
-                self._state.last_greet_ts_by_person[person_id] = ts
-                if not self._state.backend_warning_shown:
-                    self._state.backend_warning_shown = True
-                    return "Voice greet: instala pyttsx3, espeak/spd-say o ChatTTS"
-                return None
-
-            if _speak_message(self._backend, message):
-                self._state.greeted_in_presence = True
-                self._state.last_greet_ts_by_person[person_id] = ts
-                return f"Saludo: {message}"
-            return None
 
         if self._state.current_person_id is None:
             return None
@@ -182,6 +196,20 @@ class VoiceAssistant:
             self._state.current_person_id = None
             self._state.greeted_in_presence = False
         return None
+
+    def _cleanup_stale_unknown_presences(self, now_ts: float) -> None:
+        absence_seconds = max(0.0, float(self._settings.absence_seconds))
+        if absence_seconds <= 0.0:
+            return
+
+        stale_keys = [
+            key
+            for key, last_seen in self._state.unknown_presence_last_seen_ts.items()
+            if (now_ts - last_seen) >= absence_seconds
+        ]
+        for key in stale_keys:
+            self._state.unknown_presence_last_seen_ts.pop(key, None)
+            self._state.unknown_presence_greeted.pop(key, None)
 
     def _resolve_person_metadata(
         self,
@@ -226,7 +254,6 @@ def build_voice_settings_from_args(args: Any) -> VoiceSettings:
         melo_speaker=getattr(args, "melo_speaker", None),
         melo_speed=getattr(args, "melo_speed", None),
         melo_device=getattr(args, "melo_device", None),
-        chattts_seed=getattr(args, "chattts_seed", None),
         min_face_ratio_for_greeting=max(0.0, float(getattr(args, "voice_min_face_ratio", 0.0))),
     )
 
@@ -241,6 +268,30 @@ def _is_unknown_face_detected(result: RecognitionResult, face_ratio: float | Non
     if face_ratio is not None and float(face_ratio) > 0.0:
         return True
     return False
+
+
+def _build_unknown_presence_key(presence_id: str | None) -> str:
+    if presence_id is None:
+        return UNKNOWN_PRESENCE_ID
+    value = str(presence_id).strip()
+    if not value:
+        return UNKNOWN_PRESENCE_ID
+    return f"{UNKNOWN_PRESENCE_ID}::{value}"
+
+
+def _should_keep_known_presence_on_ambiguous(
+    *,
+    result: RecognitionResult,
+    current_person_id: str | None,
+    close_enough: bool,
+) -> bool:
+    if not close_enough:
+        return False
+    if current_person_id is None or current_person_id == UNKNOWN_PRESENCE_ID:
+        return False
+    if result.decision != "ambiguous_match" or result.top1 is None:
+        return False
+    return result.top1.person_id == current_person_id
 
 
 def _is_face_close_enough(
@@ -386,99 +437,6 @@ class _Pyttsx3Speaker:
         self._thread.join(timeout=1.0)
 
 
-class _ChatTTSSpeaker:
-    def __init__(self, voice_seed: int | None = None) -> None:
-        self._voice_seed = voice_seed
-        self._queue: queue.SimpleQueue[str | None] = queue.SimpleQueue()
-        self._ready = threading.Event()
-        self._failed = False
-        self._last_error: str | None = None
-        self._thread = threading.Thread(target=self._run, name="chattts-speaker", daemon=True)
-        self._thread.start()
-        ready = self._ready.wait(timeout=300.0)
-        if not ready:
-            self._failed = True
-            self._last_error = "ChatTTS initialization timed out (download/loading took too long)"
-
-    @property
-    def last_error(self) -> str | None:
-        return self._last_error
-
-    def _run(self) -> None:
-        try:
-            import ChatTTS
-            import torch
-        except Exception as exc:
-            self._failed = True
-            self._last_error = f"Could not import ChatTTS/torch: {exc}"
-            self._ready.set()
-            return
-
-        sounddevice = None
-        try:
-            import sounddevice as sd  # type: ignore
-
-            sounddevice = sd
-        except Exception:
-            sounddevice = None
-
-        player = None if sounddevice is not None else _detect_audio_player()
-        if sounddevice is None and player is None:
-            self._failed = True
-            self._last_error = "No audio output backend available (sounddevice/paplay/aplay/ffplay)"
-            self._ready.set()
-            return
-
-        try:
-            if self._voice_seed is not None:
-                torch.manual_seed(int(self._voice_seed))
-
-            chat = ChatTTS.Chat()
-            chat.load(compile=False)
-            speaker_emb = chat.sample_random_speaker()
-            infer_params = ChatTTS.Chat.InferCodeParams(
-                spk_emb=speaker_emb,
-            )
-        except Exception as exc:
-            self._failed = True
-            self._last_error = f"ChatTTS model init failed: {exc}"
-            self._ready.set()
-            return
-
-        self._ready.set()
-        while True:
-            message = self._queue.get()
-            if message is None:
-                break
-            try:
-                wavs = chat.infer(
-                    [message],
-                    params_infer_code=infer_params,
-                )
-                if not wavs:
-                    continue
-                audio = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
-                _play_audio(
-                    audio=audio,
-                    sample_rate=24000,
-                    sounddevice=sounddevice,
-                    player=player,
-                )
-            except Exception as exc:
-                self._last_error = f"ChatTTS synth/playback error: {exc}"
-                continue
-
-    def enqueue(self, message: str) -> bool:
-        if self._failed:
-            return False
-        self._queue.put(message)
-        return True
-
-    def close(self) -> None:
-        self._queue.put(None)
-        self._thread.join(timeout=1.0)
-
-
 class _MeloTTSSpeaker:
     def __init__(
         self,
@@ -591,14 +549,12 @@ def _build_voice_backend(settings: VoiceSettings) -> tuple[VoiceBackend | None, 
             selected = "melotts"
         elif _can_import_pyttsx3():
             selected = "pyttsx3"
-        elif _can_import_chattts():
-            selected = "chattts"
         elif shutil.which("spd-say"):
             selected = "spd-say"
         elif shutil.which("espeak"):
             selected = "espeak"
         else:
-            return None, "No TTS backend found (melotts/chattts/pyttsx3/spd-say/espeak)"
+            return None, "No TTS backend found (melotts/pyttsx3/spd-say/espeak)"
 
     if selected == "melotts":
         try:
@@ -638,15 +594,6 @@ def _build_voice_backend(settings: VoiceSettings) -> tuple[VoiceBackend | None, 
             return VoiceBackend(kind="espeak", engine={"lang": settings.voice_lang}), None
         return None, "espeak executable not found"
 
-    if selected == "chattts":
-        try:
-            speaker = _ChatTTSSpeaker(voice_seed=settings.chattts_seed)
-            if speaker._failed:
-                return None, speaker.last_error
-            return VoiceBackend(kind="chattts", engine=speaker), None
-        except Exception as exc:
-            return None, f"ChatTTS init failed: {exc}"
-
     return None, f"Unsupported voice backend '{selected}'"
 
 
@@ -662,15 +609,6 @@ def _can_import_pyttsx3() -> bool:
 def _can_import_melotts() -> bool:
     try:
         from melo.api import TTS  # noqa: F401
-
-        return True
-    except Exception:
-        return False
-
-
-def _can_import_chattts() -> bool:
-    try:
-        import ChatTTS  # noqa: F401
 
         return True
     except Exception:
@@ -719,10 +657,6 @@ def _speak_message(backend: VoiceBackend, message: str) -> bool:
             if not isinstance(backend.engine, _Pyttsx3Speaker):
                 return False
             return backend.engine.enqueue(message)
-        if backend.kind == "chattts":
-            if not isinstance(backend.engine, _ChatTTSSpeaker):
-                return False
-            return backend.engine.enqueue(message)
         if backend.kind == "spd-say":
             lang = None
             if isinstance(backend.engine, dict):
@@ -765,10 +699,6 @@ def _close_voice_backend(backend: VoiceBackend | None) -> None:
     if backend.kind == "pyttsx3" and isinstance(backend.engine, _Pyttsx3Speaker):
         backend.engine.close()
         return
-    if backend.kind == "chattts" and isinstance(backend.engine, _ChatTTSSpeaker):
-        backend.engine.close()
-
-
 def _detect_audio_player() -> list[str] | None:
     if shutil.which("paplay"):
         return ["paplay"]
