@@ -122,29 +122,40 @@ Comportamiento:
 Modo por flags:
 
 - `--voice-greet`
-- `--voice-backend auto|chattts|pyttsx3|spd-say|espeak`
+- `--voice-backend auto|melotts|chattts|pyttsx3|spd-say|espeak`
 
 Valores por config (`.env`):
 
 - `DEMO_VOICE_TEMPLATE`
 - `DEMO_VOICE_REENTRY_DELAY_SECONDS`
 - `DEMO_VOICE_ABSENCE_SECONDS`
+- `DEMO_VOICE_MIN_FACE_RATIO`
 - `DEMO_VOICE_LANG`
 - `DEMO_VOICE_RATE`
 - `DEMO_VOICE_VOLUME`
 - `DEMO_VOICE_ID`
+- `DEMO_MELO_LANGUAGE`
+- `DEMO_MELO_SPEAKER`
+- `DEMO_MELO_SPEED`
+- `DEMO_MELO_DEVICE`
 
 Ejemplo (modo por flags + valores desde `.env`):
 
 ```bash
-python3 scripts/run_camera_demo.py --voice-greet --voice-backend chattts
+python3 scripts/run_camera_demo.py --voice-greet --voice-backend melotts
 ```
 
-Instalacion sugerida para ChatTTS:
+Instalacion sugerida para MeloTTS:
 
 ```bash
-pip install "ChatTTS @ git+https://github.com/2noise/ChatTTS.git"
+pip install "melotts @ git+https://github.com/myshell-ai/MeloTTS.git"
 pip install sounddevice
+```
+
+Script de prueba de voz (sin camara):
+
+```bash
+python3 scripts/test_voice_chat.py --backend melotts --voice-lang es --interactive
 ```
 
 ## Runbook base

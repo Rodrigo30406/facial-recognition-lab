@@ -15,6 +15,7 @@ dependencies = [
   "python-multipart",
   "pyttsx3",
   "sounddevice",
+  "melotts @ git+https://github.com/myshell-ai/MeloTTS.git",
   "ChatTTS @ git+https://github.com/2noise/ChatTTS.git",
   "pydantic>=2",
   "numpy<2.0",

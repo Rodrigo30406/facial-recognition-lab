@@ -48,13 +48,13 @@ python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --enroll-
 Saludo por voz opcional en deteccion:
 
 ```bash
-python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --recognize-every 3 --voice-greet --voice-backend chattts
+python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --recognize-every 3 --voice-greet --voice-backend melotts
 ```
 
-Para backend ChatTTS, instala en tu entorno:
+Para backend MeloTTS, instala en tu entorno:
 
 ```bash
-pip install "ChatTTS @ git+https://github.com/2noise/ChatTTS.git"
+pip install "melotts @ git+https://github.com/myshell-ai/MeloTTS.git"
 pip install sounddevice
 ```
 
