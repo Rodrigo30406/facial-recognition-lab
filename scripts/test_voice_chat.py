@@ -89,78 +89,6 @@ class _Pyttsx3Speaker:
         self._thread.join(timeout=1.0)
 
 
-class _ChatTTSSpeaker:
-    def __init__(self, seed: int | None = None) -> None:
-        self._seed = seed
-        self._queue: queue.SimpleQueue[str | None] = queue.SimpleQueue()
-        self._ready = threading.Event()
-        self._failed = False
-        self._thread = threading.Thread(target=self._run, name="chattts-speaker", daemon=True)
-        self._thread.start()
-        self._ready.wait(timeout=30.0)
-
-    def _run(self) -> None:
-        try:
-            import ChatTTS
-            import torch
-        except Exception:
-            self._failed = True
-            self._ready.set()
-            return
-
-        sounddevice = None
-        try:
-            import sounddevice as sd  # type: ignore
-
-            sounddevice = sd
-        except Exception:
-            sounddevice = None
-
-        player = None if sounddevice is not None else _detect_audio_player()
-        if sounddevice is None and player is None:
-            self._failed = True
-            self._ready.set()
-            return
-
-        try:
-            if self._seed is not None:
-                torch.manual_seed(int(self._seed))
-            chat = ChatTTS.Chat()
-            chat.load(compile=False)
-            speaker_emb = chat.sample_random_speaker()
-            params = ChatTTS.Chat.InferCodeParams(spk_emb=speaker_emb)
-        except Exception:
-            self._failed = True
-            self._ready.set()
-            return
-
-        self._ready.set()
-        while True:
-            text = self._queue.get()
-            if text is None:
-                break
-            try:
-                wavs = chat.infer([text], params_infer_code=params)
-                if not wavs:
-                    continue
-                import numpy as np
-
-                audio = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
-                _play_audio(audio=audio, sample_rate=24000, sounddevice=sounddevice, player=player)
-            except Exception:
-                continue
-
-    def enqueue(self, text: str) -> bool:
-        if self._failed:
-            return False
-        self._queue.put(text)
-        return True
-
-    def close(self) -> None:
-        self._queue.put(None)
-        self._thread.join(timeout=1.0)
-
-
 class _MeloTTSSpeaker:
     def __init__(
         self,
@@ -444,15 +372,6 @@ def _can_import_melotts() -> bool:
         return False
 
 
-def _can_import_chattts() -> bool:
-    try:
-        import ChatTTS  # noqa: F401
-
-        return True
-    except Exception:
-        return False
-
-
 def _select_pyttsx3_voice(engine: Any, language_hint: str) -> str | None:
     hint = language_hint.strip().lower().replace("-", "_")
     if not hint:
@@ -506,8 +425,6 @@ def _build_backend(args: argparse.Namespace) -> VoiceBackend | None:
             selected = "melotts"
         elif _can_import_pyttsx3():
             selected = "pyttsx3"
-        elif _can_import_chattts():
-            selected = "chattts"
         elif shutil.which("spd-say"):
             selected = "spd-say"
         elif shutil.which("espeak"):
@@ -539,12 +456,6 @@ def _build_backend(args: argparse.Namespace) -> VoiceBackend | None:
             return None
         return VoiceBackend(kind="pyttsx3", engine=speaker)
 
-    if selected == "chattts":
-        speaker = _ChatTTSSpeaker(seed=args.chattts_seed)
-        if speaker._failed:
-            return None
-        return VoiceBackend(kind="chattts", engine=speaker)
-
     if selected == "spd-say":
         if shutil.which("spd-say"):
             return VoiceBackend(kind="spd-say", engine={"lang": args.voice_lang})
@@ -566,10 +477,6 @@ def _speak_once(backend: VoiceBackend, text: str) -> bool:
             return backend.engine.enqueue(text)
         if backend.kind == "pyttsx3":
             if not isinstance(backend.engine, _Pyttsx3Speaker):
-                return False
-            return backend.engine.enqueue(text)
-        if backend.kind == "chattts":
-            if not isinstance(backend.engine, _ChatTTSSpeaker):
                 return False
             return backend.engine.enqueue(text)
         if backend.kind == "spd-say":
@@ -602,10 +509,6 @@ def _close_backend(backend: VoiceBackend | None) -> None:
     if backend.kind == "pyttsx3" and isinstance(backend.engine, _Pyttsx3Speaker):
         backend.engine.close()
         return
-    if backend.kind == "chattts" and isinstance(backend.engine, _ChatTTSSpeaker):
-        backend.engine.close()
-
-
 def _default_texts(language: str | None) -> list[str]:
     if language and language.lower().startswith("es"):
         return [
@@ -622,7 +525,7 @@ def _default_texts(language: str | None) -> list[str]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Voice backend tester")
-    parser.add_argument("--backend", choices=("auto", "melotts", "chattts", "pyttsx3", "spd-say", "espeak"), default="auto")
+    parser.add_argument("--backend", choices=("auto", "melotts", "pyttsx3", "spd-say", "espeak"), default="auto")
     parser.add_argument("--voice-lang", type=str, default=None)
     parser.add_argument("--voice-rate", type=int, default=None)
     parser.add_argument("--voice-volume", type=float, default=None)
@@ -631,7 +534,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--melo-speaker", type=str, default=None)
     parser.add_argument("--melo-speed", type=float, default=None)
     parser.add_argument("--melo-device", type=str, default=None)
-    parser.add_argument("--chattts-seed", type=int, default=None)
     parser.add_argument("--text", action="append", default=None, help="Repeatable. Add one sentence per --text")
     parser.add_argument("--delay-seconds", type=float, default=1.2)
     parser.add_argument("--interactive", action="store_true")
