@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Protocol
 
-from facial_recognition.domain.entities import (
+from eleccia_vision.domain.entities import (
     FaceRecord,
     FaceSampleRecord,
     PersonRecord,

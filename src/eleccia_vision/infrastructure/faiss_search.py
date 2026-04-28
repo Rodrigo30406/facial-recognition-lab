@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from facial_recognition.domain.entities import FaceRecord, RecognitionCandidate
+from eleccia_vision.domain.entities import FaceRecord, RecognitionCandidate
 
 
 class FaissSearcher:

@@ -1,6 +1,6 @@
 import numpy as np
 
-from facial_recognition.application.quality_gate import (
+from eleccia_vision.application.quality_gate import (
     FaceObservation,
     QualityGateThresholds,
     build_angle_plan,

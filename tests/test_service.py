@@ -1,13 +1,13 @@
-from facial_recognition.application.persons import (
+from eleccia_vision.application.persons import (
     InvalidPersonSexError,
     PersonAlreadyExistsError,
     PersonService,
 )
-from facial_recognition.application.services import FaceRecognitionService
-from facial_recognition.config import Settings
-from facial_recognition.infrastructure.dummy_encoder import DummyFaceEncoder
-from facial_recognition.infrastructure.inmemory_person_repo import InMemoryPersonRepository
-from facial_recognition.infrastructure.inmemory_repo import InMemoryFaceRepository
+from eleccia_vision.application.services import FaceRecognitionService
+from eleccia_vision.config import Settings
+from eleccia_vision.infrastructure.dummy_encoder import DummyFaceEncoder
+from eleccia_vision.infrastructure.inmemory_person_repo import InMemoryPersonRepository
+from eleccia_vision.infrastructure.inmemory_repo import InMemoryFaceRepository
 
 
 def test_enroll_and_match_same_image() -> None:

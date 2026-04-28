@@ -1,10 +1,10 @@
 import pytest
 
-from facial_recognition.application.recognition import RecognitionService
-from facial_recognition.config import Settings
-from facial_recognition.domain.entities import FaceRecord
-from facial_recognition.infrastructure.faiss_search import FaissSearcher
-from facial_recognition.infrastructure.inmemory_repo import InMemoryFaceRepository
+from eleccia_vision.application.recognition import RecognitionService
+from eleccia_vision.config import Settings
+from eleccia_vision.domain.entities import FaceRecord
+from eleccia_vision.infrastructure.faiss_search import FaissSearcher
+from eleccia_vision.infrastructure.inmemory_repo import InMemoryFaceRepository
 
 
 class MapEncoder:

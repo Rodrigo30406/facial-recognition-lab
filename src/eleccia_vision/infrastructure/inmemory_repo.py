@@ -1,5 +1,5 @@
-from facial_recognition.domain.entities import FaceRecord
-from facial_recognition.domain.interfaces import FaceRepository
+from eleccia_vision.domain.entities import FaceRecord
+from eleccia_vision.domain.interfaces import FaceRepository
 
 
 class InMemoryFaceRepository(FaceRepository):

@@ -6,8 +6,8 @@ from time import time_ns
 import cv2
 import numpy as np
 
-from facial_recognition.domain.entities import FaceRecord, FaceSampleRecord
-from facial_recognition.domain.interfaces import (
+from eleccia_vision.domain.entities import FaceRecord, FaceSampleRecord
+from eleccia_vision.domain.interfaces import (
     FaceEncoder,
     FaceRepository,
     FaceSampleRepository,

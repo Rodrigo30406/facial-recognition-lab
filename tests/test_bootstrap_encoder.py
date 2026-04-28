@@ -1,8 +1,8 @@
 import pytest
 
-import facial_recognition.bootstrap as bootstrap_module
-from facial_recognition.config import Settings
-from facial_recognition.infrastructure.dummy_encoder import DummyFaceEncoder
+import eleccia_vision.bootstrap as bootstrap_module
+from eleccia_vision.config import Settings
+from eleccia_vision.infrastructure.dummy_encoder import DummyFaceEncoder
 
 
 def test_build_encoder_dummy_backend() -> None:

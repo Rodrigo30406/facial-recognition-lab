@@ -1,5 +1,5 @@
-from facial_recognition.domain.entities import FaceSampleRecord
-from facial_recognition.domain.interfaces import FaceSampleRepository
+from eleccia_vision.domain.entities import FaceSampleRecord
+from eleccia_vision.domain.interfaces import FaceSampleRepository
 
 
 class InMemoryFaceSampleRepository(FaceSampleRepository):

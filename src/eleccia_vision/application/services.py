@@ -1,8 +1,8 @@
 from math import sqrt
 
-from facial_recognition.config import Settings
-from facial_recognition.domain.entities import FaceRecord, MatchResult
-from facial_recognition.domain.interfaces import FaceEncoder, FaceRepository
+from eleccia_vision.config import Settings
+from eleccia_vision.domain.entities import FaceRecord, MatchResult
+from eleccia_vision.domain.interfaces import FaceEncoder, FaceRepository
 
 
 class FaceRecognitionService:

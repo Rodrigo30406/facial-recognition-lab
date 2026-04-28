@@ -4,19 +4,19 @@ from datetime import datetime
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, sessionmaker
 
-from facial_recognition.domain.entities import (
+from eleccia_vision.domain.entities import (
     FaceRecord,
     FaceSampleRecord,
     PersonRecord,
     RecognitionEventRecord,
 )
-from facial_recognition.domain.interfaces import (
+from eleccia_vision.domain.interfaces import (
     FaceRepository,
     FaceSampleRepository,
     PersonRepository,
     RecognitionEventRepository,
 )
-from facial_recognition.infrastructure.sqlalchemy_models import (
+from eleccia_vision.infrastructure.sqlalchemy_models import (
     FaceEmbeddingModel,
     FaceSampleModel,
     PersonModel,

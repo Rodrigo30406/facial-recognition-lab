@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from facial_recognition.domain.entities import RecognitionEventRecord
-from facial_recognition.domain.interfaces import RecognitionEventRepository
+from eleccia_vision.domain.entities import RecognitionEventRecord
+from eleccia_vision.domain.interfaces import RecognitionEventRepository
 
 
 class InMemoryRecognitionEventRepository(RecognitionEventRepository):

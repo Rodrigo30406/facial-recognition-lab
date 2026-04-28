@@ -8,7 +8,7 @@ class Settings:
     """Application settings container."""
 
     similarity_threshold: float = 0.45
-    database_url: str = "sqlite:///data/db/facial_recognition.db"
+    database_url: str = "sqlite:///data/db/eleccia_vision.db"
     sample_storage_dir: str = "data/samples"
 
     # Cosine similarity policy for FAISS-based recognition.

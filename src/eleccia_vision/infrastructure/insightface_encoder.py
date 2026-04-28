@@ -7,7 +7,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from facial_recognition.domain.interfaces import FaceEncoder
+from eleccia_vision.domain.interfaces import FaceEncoder
 
 
 @dataclass(frozen=True)

@@ -4,18 +4,18 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from facial_recognition.application.consistency import RecognitionConsistencyService
-from facial_recognition.application.enrollment import EnrollmentService
-from facial_recognition.application.events import RecognitionEventService
-from facial_recognition.application.persons import PersonService
-from facial_recognition.application.recognition import RecognitionService
-from facial_recognition.application.services import FaceRecognitionService
-from facial_recognition.config import Settings
-from facial_recognition.infrastructure.dummy_encoder import DummyFaceEncoder
-from facial_recognition.infrastructure.insightface_encoder import InsightFaceEncoder
-from facial_recognition.infrastructure.faiss_search import FaissSearcher
-from facial_recognition.infrastructure.sqlalchemy_models import Base
-from facial_recognition.infrastructure.sqlite_repos import (
+from eleccia_vision.application.consistency import RecognitionConsistencyService
+from eleccia_vision.application.enrollment import EnrollmentService
+from eleccia_vision.application.events import RecognitionEventService
+from eleccia_vision.application.persons import PersonService
+from eleccia_vision.application.recognition import RecognitionService
+from eleccia_vision.application.services import FaceRecognitionService
+from eleccia_vision.config import Settings
+from eleccia_vision.infrastructure.dummy_encoder import DummyFaceEncoder
+from eleccia_vision.infrastructure.insightface_encoder import InsightFaceEncoder
+from eleccia_vision.infrastructure.faiss_search import FaissSearcher
+from eleccia_vision.infrastructure.sqlalchemy_models import Base
+from eleccia_vision.infrastructure.sqlite_repos import (
     SQLiteFaceRepository,
     SQLiteFaceSampleRepository,
     SQLitePersonRepository,

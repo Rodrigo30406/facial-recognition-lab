@@ -3,16 +3,16 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from facial_recognition.application.enrollment import (
+from eleccia_vision.application.enrollment import (
     EnrollmentService,
     InvalidImageError,
     PersonNotFoundError,
 )
-from facial_recognition.domain.entities import PersonRecord
-from facial_recognition.infrastructure.dummy_encoder import DummyFaceEncoder
-from facial_recognition.infrastructure.inmemory_person_repo import InMemoryPersonRepository
-from facial_recognition.infrastructure.inmemory_repo import InMemoryFaceRepository
-from facial_recognition.infrastructure.inmemory_sample_repo import InMemoryFaceSampleRepository
+from eleccia_vision.domain.entities import PersonRecord
+from eleccia_vision.infrastructure.dummy_encoder import DummyFaceEncoder
+from eleccia_vision.infrastructure.inmemory_person_repo import InMemoryPersonRepository
+from eleccia_vision.infrastructure.inmemory_repo import InMemoryFaceRepository
+from eleccia_vision.infrastructure.inmemory_sample_repo import InMemoryFaceSampleRepository
 
 
 def _make_image_bytes() -> bytes:

@@ -1,8 +1,8 @@
 from datetime import timedelta
 
-from facial_recognition.application.events import RecognitionEventService
-from facial_recognition.domain.entities import RecognitionCandidate, RecognitionResult
-from facial_recognition.infrastructure.inmemory_event_repo import InMemoryRecognitionEventRepository
+from eleccia_vision.application.events import RecognitionEventService
+from eleccia_vision.domain.entities import RecognitionCandidate, RecognitionResult
+from eleccia_vision.infrastructure.inmemory_event_repo import InMemoryRecognitionEventRepository
 
 
 def test_record_and_list_events() -> None:

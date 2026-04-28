@@ -2,7 +2,7 @@ from datetime import datetime
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 
-from facial_recognition.api.schemas import (
+from eleccia_vision.api.schemas import (
     CandidateResponse,
     EnrollResponse,
     EnrollmentImageResponse,
@@ -12,9 +12,9 @@ from facial_recognition.api.schemas import (
     RecognitionEventResponse,
     RecognitionMatchResponse,
 )
-from facial_recognition.application.enrollment import InvalidImageError, PersonNotFoundError
-from facial_recognition.application.persons import InvalidPersonSexError, PersonAlreadyExistsError
-from facial_recognition.bootstrap import build_services
+from eleccia_vision.application.enrollment import InvalidImageError, PersonNotFoundError
+from eleccia_vision.application.persons import InvalidPersonSexError, PersonAlreadyExistsError
+from eleccia_vision.bootstrap import build_services
 
 app = FastAPI(title="Facial Recognition API", version="0.1.0")
 services = build_services()

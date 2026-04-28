@@ -1,6 +1,6 @@
 import hashlib
 
-from facial_recognition.domain.interfaces import FaceEncoder
+from eleccia_vision.domain.interfaces import FaceEncoder
 
 
 class DummyFaceEncoder(FaceEncoder):

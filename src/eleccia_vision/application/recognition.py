@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from facial_recognition.config import Settings
-from facial_recognition.domain.entities import RecognitionCandidate, RecognitionResult
-from facial_recognition.domain.interfaces import FaceEncoder, FaceRepository
-from facial_recognition.infrastructure.faiss_search import FaissSearcher
+from eleccia_vision.config import Settings
+from eleccia_vision.domain.entities import RecognitionCandidate, RecognitionResult
+from eleccia_vision.domain.interfaces import FaceEncoder, FaceRepository
+from eleccia_vision.infrastructure.faiss_search import FaissSearcher
 
 
 class RecognitionService:

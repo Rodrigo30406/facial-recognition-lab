@@ -1,5 +1,5 @@
-from facial_recognition.domain.entities import PersonRecord
-from facial_recognition.domain.interfaces import PersonRepository
+from eleccia_vision.domain.entities import PersonRecord
+from eleccia_vision.domain.interfaces import PersonRepository
 
 
 class PersonAlreadyExistsError(ValueError):

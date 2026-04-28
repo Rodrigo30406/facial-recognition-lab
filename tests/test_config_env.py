@@ -1,6 +1,6 @@
 import pytest
 
-from facial_recognition.config import Settings
+from eleccia_vision.config import Settings
 
 
 @pytest.fixture(autouse=True)

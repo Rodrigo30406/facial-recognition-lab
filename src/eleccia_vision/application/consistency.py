@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from threading import Lock
 
-from facial_recognition.domain.entities import RecognitionResult
+from eleccia_vision.domain.entities import RecognitionResult
 
 
 @dataclass

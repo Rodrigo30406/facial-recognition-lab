@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 import pytest
 
-from facial_recognition.infrastructure.insightface_encoder import InsightFaceEncoder
+from eleccia_vision.infrastructure.insightface_encoder import InsightFaceEncoder
 
 
 @dataclass

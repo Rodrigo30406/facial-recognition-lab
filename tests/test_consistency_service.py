@@ -1,5 +1,5 @@
-from facial_recognition.application.consistency import RecognitionConsistencyService
-from facial_recognition.domain.entities import RecognitionCandidate, RecognitionResult
+from eleccia_vision.application.consistency import RecognitionConsistencyService
+from eleccia_vision.domain.entities import RecognitionCandidate, RecognitionResult
 
 
 def _known(person_id: str, score: float = 0.9) -> RecognitionResult:
