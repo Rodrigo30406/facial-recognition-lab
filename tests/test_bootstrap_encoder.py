@@ -1,6 +1,6 @@
 import pytest
 
-import eleccia_vision.bootstrap as bootstrap_module
+import eleccia_core.bootstrap as bootstrap_module
 from eleccia_vision.config import Settings
 from eleccia_vision.infrastructure.dummy_encoder import DummyFaceEncoder
 
