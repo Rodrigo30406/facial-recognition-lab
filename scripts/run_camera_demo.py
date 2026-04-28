@@ -27,8 +27,8 @@ SRC_PATH = REPO_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from facial_recognition.application.enrollment import InvalidImageError, PersonNotFoundError
-from facial_recognition.application.quality_gate import (
+from eleccia_vision.application.enrollment import InvalidImageError, PersonNotFoundError
+from eleccia_vision.application.quality_gate import (
     AngleBucket,
     FaceObservation,
     QualityGateThresholds,
@@ -36,10 +36,10 @@ from facial_recognition.application.quality_gate import (
     bucket_instruction,
     evaluate_quality_gate,
 )
-from facial_recognition.bootstrap import build_services
-from facial_recognition.domain.entities import RecognitionResult
-from facial_recognition.infrastructure.insightface_encoder import DetectedFace
-from facial_recognition.voice import VoiceAssistant, build_voice_settings_from_args
+from eleccia_vision.bootstrap import build_services
+from eleccia_vision.domain.entities import RecognitionResult
+from eleccia_vision.infrastructure.insightface_encoder import DetectedFace
+from eleccia_voice import VoiceAssistant, build_voice_settings_from_args
 
 
 @dataclass

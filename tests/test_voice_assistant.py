@@ -1,8 +1,8 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from facial_recognition.domain.entities import RecognitionCandidate, RecognitionResult
-from facial_recognition.voice import VoiceAssistant, VoiceSettings, format_voice_message, resolve_welcome_word
+from eleccia_vision.domain.entities import RecognitionCandidate, RecognitionResult
+from eleccia_voice import VoiceAssistant, VoiceSettings, format_voice_message, resolve_welcome_word
 
 
 def _known(person_id: str) -> RecognitionResult:
@@ -74,7 +74,7 @@ def test_voice_assistant_unknown_person_greeting() -> None:
         top2=None,
     )
 
-    with patch("facial_recognition.voice.assistant._speak_message", return_value=True):
+    with patch("eleccia_voice.assistant._speak_message", return_value=True):
         msg1 = assistant.on_recognition(
             unknown,
             resolve_person=lambda _person_id: ("", None),
@@ -109,7 +109,7 @@ def test_voice_assistant_unknown_without_candidates_but_face_ratio_greets() -> N
         top2=None,
     )
 
-    with patch("facial_recognition.voice.assistant._speak_message", return_value=True):
+    with patch("eleccia_voice.assistant._speak_message", return_value=True):
         msg = assistant.on_recognition(
             unknown,
             resolve_person=lambda _person_id: ("", None),
@@ -132,7 +132,7 @@ def test_voice_assistant_proximity_filter_blocks_far_face() -> None:
     )
     assistant._backend = SimpleNamespace(kind="stub", engine=None)
 
-    with patch("facial_recognition.voice.assistant._speak_message", return_value=True):
+    with patch("eleccia_voice.assistant._speak_message", return_value=True):
         far_msg = assistant.on_recognition(
             _known("alice"),
             resolve_person=lambda _person_id: ("Alice Doe", "female"),
@@ -162,7 +162,7 @@ def test_voice_assistant_pose_compensation_allows_side_face() -> None:
     )
     assistant._backend = SimpleNamespace(kind="stub", engine=None)
 
-    with patch("facial_recognition.voice.assistant._speak_message", return_value=True):
+    with patch("eleccia_voice.assistant._speak_message", return_value=True):
         side_msg = assistant.on_recognition(
             _known("alice"),
             resolve_person=lambda _person_id: ("Alice Doe", "female"),

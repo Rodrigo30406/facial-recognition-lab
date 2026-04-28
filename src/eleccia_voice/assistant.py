@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 import numpy as np
 
-from facial_recognition.domain.entities import RecognitionResult
+from eleccia_vision.domain.entities import RecognitionResult
 
 PersonMetadataResolver = Callable[[str], tuple[str, str | None]]
 UNKNOWN_PRESENCE_ID = "__unknown_presence__"
@@ -77,6 +77,14 @@ class VoiceAssistant:
 
     def close(self) -> None:
         _close_voice_backend(self._backend)
+
+    def speak(self, text: str) -> bool:
+        message = str(text).strip()
+        if not message:
+            return False
+        if self._backend is None:
+            return False
+        return _speak_message(self._backend, message)
 
     def on_recognition(
         self,
