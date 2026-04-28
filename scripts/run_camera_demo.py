@@ -36,7 +36,7 @@ from eleccia_vision.application.quality_gate import (
     bucket_instruction,
     evaluate_quality_gate,
 )
-from eleccia_vision.bootstrap import build_services
+from eleccia_core.bootstrap import build_services
 from eleccia_vision.domain.entities import RecognitionResult
 from eleccia_vision.infrastructure.insightface_encoder import DetectedFace
 from eleccia_voice import VoiceAssistant, build_voice_settings_from_args
@@ -46,6 +46,7 @@ from eleccia_voice import VoiceAssistant, build_voice_settings_from_args
 class DisplayState:
     result: RecognitionResult | None = None
     latency_ms: float | None = None
+    fps: float | None = None
     message: str = ""
     message_until_ts: float = 0.0
     landmarks: list[tuple[int, int]] = field(default_factory=list)
@@ -56,6 +57,22 @@ class DisplayState:
     gate_pose: str = ""
     gate_current_bucket: AngleBucket | None = None
     gate_target_bucket: AngleBucket | None = None
+    face_overlays: list["FaceOverlay"] = field(default_factory=list)
+    unknown_label_by_track: dict[str, int] = field(default_factory=dict)
+    unknown_last_seen_ts_by_track: dict[str, float] = field(default_factory=dict)
+    next_unknown_label_id: int = 1
+    face_track_centers: dict[str, tuple[float, float]] = field(default_factory=dict)
+    face_track_last_seen_ts: dict[str, float] = field(default_factory=dict)
+    next_face_track_id: int = 1
+
+
+@dataclass(frozen=True)
+class FaceOverlay:
+    bbox: tuple[int, int, int, int]
+    label: str
+    in_range: bool
+    face_ratio: float | None
+    landmarks: list[tuple[int, int]]
 
 
 @dataclass
@@ -136,6 +153,8 @@ GUIDED_PRESETS: dict[str, GuidedPreset] = {
         max_abs_roll=30.0,
     ),
 }
+
+TRACKING_MIN_FACE_RATIO = 0.0035
 
 
 def parse_args() -> argparse.Namespace:
@@ -221,7 +240,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--voice-backend",
-        choices=("auto", "melotts", "chattts", "pyttsx3", "spd-say", "espeak"),
+        choices=("auto", "melotts", "pyttsx3", "spd-say", "espeak"),
         default="auto",
         help="TTS backend to use when --voice-greet is enabled",
     )
@@ -659,10 +678,10 @@ def _to_guided_preset(raw: str) -> str:
 
 def _to_voice_backend(raw: str) -> str:
     value = raw.strip().lower()
-    allowed = {"auto", "melotts", "chattts", "pyttsx3", "spd-say", "espeak"}
+    allowed = {"auto", "melotts", "pyttsx3", "spd-say", "espeak"}
     if value not in allowed:
         raise ValueError(
-            "DEMO_VOICE_BACKEND must be one of: auto, melotts, chattts, pyttsx3, spd-say, espeak"
+            "DEMO_VOICE_BACKEND must be one of: auto, melotts, pyttsx3, spd-say, espeak"
         )
     return value
 
@@ -722,15 +741,26 @@ def main() -> None:
         if voice_assistant.backend_kind is not None:
             print(f"- Voice greet enabled ({voice_assistant.backend_kind})")
         else:
-            print("- Voice greet enabled but no TTS backend found (melotts/chattts/pyttsx3/spd-say/espeak)")
+            print("- Voice greet enabled but no TTS backend found (melotts/pyttsx3/spd-say/espeak)")
             if voice_assistant.backend_error:
                 print(f"- Voice backend detail: {voice_assistant.backend_error}")
 
     state = DisplayState()
     frame_idx = 0
+    prev_frame_ts = time.perf_counter()
 
     try:
         while True:
+            now_ts = time.perf_counter()
+            dt = now_ts - prev_frame_ts
+            prev_frame_ts = now_ts
+            if dt > 1e-6:
+                instant_fps = 1.0 / dt
+                if state.fps is None:
+                    state.fps = instant_fps
+                else:
+                    state.fps = (state.fps * 0.85) + (instant_fps * 0.15)
+
             ok, frame = cap.read()
             if not ok:
                 state.message = "Failed to read frame"
@@ -745,6 +775,8 @@ def main() -> None:
                     state=state,
                     camera_id=args.camera_id,
                     voice_assistant=voice_assistant,
+                    min_face_ratio_for_label=max(0.0, float(args.voice_min_face_ratio)),
+                    unknown_label_ttl_seconds=max(0.0, float(args.voice_absence_seconds)),
                 )
             if args.guided_enroll:
                 _guided_enroll_step(
@@ -755,8 +787,6 @@ def main() -> None:
                     thresholds=gate_thresholds,
                     args=args,
                 )
-            elif args.show_landmarks and frame_idx % max(1, args.landmarks_every) == 0:
-                _update_landmarks(frame, services, state, args.landmarks_max_points)
 
             _draw_overlay(frame, state)
             cv2.imshow(args.window_name, frame)
@@ -778,33 +808,139 @@ def _run_recognition(
     state: DisplayState,
     camera_id: str,
     voice_assistant: VoiceAssistant,
+    min_face_ratio_for_label: float,
+    unknown_label_ttl_seconds: float,
 ) -> None:
-    payload = _frame_to_jpeg_bytes(frame)
-    if payload is None:
-        state.message = "Failed to encode frame"
-        state.message_until_ts = time.time() + 2.0
-        return
+    now_ts = time.time()
+    _cleanup_stale_face_tracks(
+        state=state,
+        now_ts=now_ts,
+        ttl_seconds=unknown_label_ttl_seconds,
+    )
+    _cleanup_unknown_track_labels(
+        state=state,
+        now_ts=now_ts,
+        ttl_seconds=unknown_label_ttl_seconds,
+        active_unknown_track_ids=set(),
+    )
 
     t0 = time.perf_counter()
-    raw = services.recognition_service.recognize(payload)
-    result = services.recognition_consistency_service.stabilize(raw, stream_id=camera_id)
+    detected_faces = _analyze_detected_faces(frame=frame, services=services, max_points=50)
+    state.face_overlays = []
+    state.landmarks = []
+
+    if not detected_faces:
+        state.result = RecognitionResult(
+            decision="unknown_person",
+            matched=False,
+            person_id=None,
+            top1=None,
+            top2=None,
+        )
+        state.latency_ms = (time.perf_counter() - t0) * 1000.0
+        return
+
+    detected_faces = sorted(detected_faces, key=lambda face: (face.bbox[0], face.bbox[1]))
+    primary_choice: tuple[float, RecognitionResult, DetectedFace] | None = None
+    first_voice_message: str | None = None
+    active_unknown_track_ids: set[str] = set()
+    tracked_faces = _assign_track_ids_for_faces(
+        state=state,
+        faces=[
+            face
+            for face in detected_faces
+            if _is_trackable_face(frame=frame, bbox=face.bbox, min_ratio=TRACKING_MIN_FACE_RATIO)
+        ],
+        now_ts=now_ts,
+    )
+    tracked_by_bbox = {tuple(face.bbox): track_id for track_id, face in tracked_faces}
+
+    for idx, face in enumerate(detected_faces):
+        track_id = tracked_by_bbox.get(tuple(face.bbox), f"ephemeral-{idx}")
+        face_payload = _crop_face_to_jpeg_bytes(frame=frame, bbox=face.bbox)
+        if face_payload is None:
+            continue
+
+        raw = services.recognition_service.recognize(face_payload)
+        result = services.recognition_consistency_service.stabilize(
+            raw,
+            stream_id=f"{camera_id}::{track_id}",
+        )
+        services.recognition_event_service.record_from_result(
+            result=result,
+            camera_id=camera_id,
+            track_id=track_id,
+        )
+
+        is_trackable = not track_id.startswith("ephemeral-")
+        if result.decision == "unknown_person" and is_trackable:
+            unknown_idx = _assign_unknown_label_id(
+                state=state,
+                track_id=track_id,
+                now_ts=now_ts,
+            )
+            active_unknown_track_ids.add(track_id)
+            label = _build_unknown_face_label(result=result, unknown_index=unknown_idx)
+        elif result.decision == "unknown_person":
+            label = _build_unknown_face_label(result=result, unknown_index=0)
+        else:
+            label = _build_face_label(services=services, result=result)
+        bbox_int = _bbox_to_int(face.bbox, frame_shape=frame.shape)
+        face_ratio = _face_ratio_from_bbox(frame=frame, bbox=face.bbox)
+        in_range = _is_in_face_ratio_range(
+            face_ratio=face_ratio,
+            min_face_ratio=min_face_ratio_for_label,
+        )
+        state.face_overlays.append(
+            FaceOverlay(
+                bbox=bbox_int,
+                label=label,
+                in_range=in_range,
+                face_ratio=face_ratio,
+                landmarks=face.landmarks,
+            )
+        )
+
+        if is_trackable:
+            voice_message = voice_assistant.on_recognition(
+                result=result,
+                resolve_person=lambda person_id: _resolve_person_metadata(services, person_id),
+                face_ratio=face_ratio,
+                pose_yaw=face.yaw,
+                pose_pitch=face.pitch,
+                presence_id=track_id,
+            )
+            if first_voice_message is None and voice_message is not None:
+                first_voice_message = voice_message
+
+        area = _bbox_area(face.bbox)
+        if primary_choice is None or area > primary_choice[0]:
+            primary_choice = (area, result, face)
+
+    _cleanup_unknown_track_labels(
+        state=state,
+        now_ts=now_ts,
+        ttl_seconds=unknown_label_ttl_seconds,
+        active_unknown_track_ids=active_unknown_track_ids,
+    )
+
     elapsed = (time.perf_counter() - t0) * 1000.0
-
-    services.recognition_event_service.record_from_result(
-        result=result,
-        camera_id=camera_id,
-    )
-
-    state.result = result
     state.latency_ms = elapsed
-    face_ratio, pose_yaw, pose_pitch = _estimate_voice_face_observation(frame=frame, services=services)
-    voice_message = voice_assistant.on_recognition(
-        result=result,
-        resolve_person=lambda person_id: _resolve_person_metadata(services, person_id),
-        face_ratio=face_ratio,
-        pose_yaw=pose_yaw,
-        pose_pitch=pose_pitch,
-    )
+
+    if primary_choice is None:
+        state.result = RecognitionResult(
+            decision="unknown_person",
+            matched=False,
+            person_id=None,
+            top1=None,
+            top2=None,
+        )
+        return
+
+    _, primary_result, _primary_face = primary_choice
+    state.result = primary_result
+
+    voice_message = first_voice_message
     if voice_message:
         state.message = voice_message
         if voice_message.startswith("Saludo:"):
@@ -857,6 +993,221 @@ def _estimate_voice_face_observation(frame, services) -> tuple[float | None, flo
     ratio = (face_w * face_h) / frame_area
     face_ratio = max(0.0, min(1.0, float(ratio)))
     return face_ratio, detected.yaw, detected.pitch
+
+
+def _analyze_detected_faces(frame, services, max_points: int) -> list[DetectedFace]:
+    encoder = getattr(services.recognition_service, "_encoder", None)
+    analyze_many = getattr(encoder, "analyze_faces", None)
+    if callable(analyze_many):
+        try:
+            faces = analyze_many(frame, max_points=max_points)
+            if isinstance(faces, list):
+                return faces
+        except Exception:
+            return []
+
+    analyze_one = getattr(encoder, "analyze_face", None)
+    if not callable(analyze_one):
+        return []
+    try:
+        face = analyze_one(frame, max_points=max_points)
+    except Exception:
+        return []
+    if face is None:
+        return []
+    return [face]
+
+
+def _crop_face_to_jpeg_bytes(frame, bbox: tuple[float, float, float, float]) -> bytes | None:
+    x1, y1, x2, y2 = _bbox_to_int(bbox, frame.shape)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    return _frame_to_jpeg_bytes(crop)
+
+
+def _bbox_to_int(
+    bbox: tuple[float, float, float, float],
+    frame_shape: tuple[int, int, int],
+) -> tuple[int, int, int, int]:
+    h, w = frame_shape[:2]
+    x1, y1, x2, y2 = bbox
+    ix1 = int(max(0, min(w - 1, round(float(x1)))))
+    iy1 = int(max(0, min(h - 1, round(float(y1)))))
+    ix2 = int(max(0, min(w, round(float(x2)))))
+    iy2 = int(max(0, min(h, round(float(y2)))))
+    return ix1, iy1, ix2, iy2
+
+
+def _bbox_area(bbox: tuple[float, float, float, float]) -> float:
+    x1, y1, x2, y2 = bbox
+    return max(0.0, float(x2) - float(x1)) * max(0.0, float(y2) - float(y1))
+
+
+def _bbox_center(bbox: tuple[float, float, float, float]) -> tuple[float, float]:
+    x1, y1, x2, y2 = bbox
+    cx = (float(x1) + float(x2)) * 0.5
+    cy = (float(y1) + float(y2)) * 0.5
+    return cx, cy
+
+
+def _assign_track_ids_for_faces(
+    state: DisplayState,
+    faces: list[DetectedFace],
+    now_ts: float,
+) -> list[tuple[str, DetectedFace]]:
+    if not faces:
+        return []
+
+    available_tracks = list(state.face_track_centers.keys())
+    assigned_tracks: set[str] = set()
+    assignments: list[tuple[str, DetectedFace]] = []
+
+    for face in faces:
+        track_id = _match_face_to_existing_track(
+            face=face,
+            available_tracks=available_tracks,
+            assigned_tracks=assigned_tracks,
+            state=state,
+        )
+        if track_id is None:
+            track_id = f"face-{state.next_face_track_id}"
+            state.next_face_track_id += 1
+
+        state.face_track_centers[track_id] = _bbox_center(face.bbox)
+        state.face_track_last_seen_ts[track_id] = now_ts
+        assigned_tracks.add(track_id)
+        assignments.append((track_id, face))
+
+    return assignments
+
+
+def _match_face_to_existing_track(
+    face: DetectedFace,
+    available_tracks: list[str],
+    assigned_tracks: set[str],
+    state: DisplayState,
+) -> str | None:
+    face_center = _bbox_center(face.bbox)
+    face_area = max(1.0, _bbox_area(face.bbox))
+    max_dist = max(60.0, min(260.0, 0.8 * float(np.sqrt(face_area))))
+
+    best_track: str | None = None
+    best_distance = float("inf")
+    for track_id in available_tracks:
+        if track_id in assigned_tracks:
+            continue
+        center = state.face_track_centers.get(track_id)
+        if center is None:
+            continue
+        dx = float(face_center[0] - center[0])
+        dy = float(face_center[1] - center[1])
+        dist = float(np.hypot(dx, dy))
+        if dist < best_distance:
+            best_distance = dist
+            best_track = track_id
+
+    if best_track is None:
+        return None
+    if best_distance > max_dist:
+        return None
+    return best_track
+
+
+def _cleanup_stale_face_tracks(state: DisplayState, now_ts: float, ttl_seconds: float) -> None:
+    if ttl_seconds <= 0.0:
+        return
+
+    stale_tracks = [
+        track_id
+        for track_id, last_seen in state.face_track_last_seen_ts.items()
+        if (now_ts - float(last_seen)) >= ttl_seconds
+    ]
+    for track_id in stale_tracks:
+        state.face_track_last_seen_ts.pop(track_id, None)
+        state.face_track_centers.pop(track_id, None)
+
+
+def _face_ratio_from_bbox(frame, bbox: tuple[float, float, float, float]) -> float | None:
+    h, w = frame.shape[:2]
+    if h <= 0 or w <= 0:
+        return None
+    frame_area = float(h * w)
+    if frame_area <= 0.0:
+        return None
+    ratio = _bbox_area(bbox) / frame_area
+    return max(0.0, min(1.0, float(ratio)))
+
+
+def _is_trackable_face(
+    frame,
+    bbox: tuple[float, float, float, float],
+    min_ratio: float,
+) -> bool:
+    ratio = _face_ratio_from_bbox(frame=frame, bbox=bbox)
+    if ratio is None:
+        return False
+    return float(ratio) >= max(0.0, float(min_ratio))
+
+
+def _build_face_label(services, result: RecognitionResult) -> str:
+    if result.decision == "known_person" and result.person_id is not None:
+        name, _sex = _resolve_person_metadata(services, result.person_id)
+        if result.top1 is not None:
+            return f"{name} ({result.top1.score:.2f})"
+        return name
+
+    if result.decision == "ambiguous_match" and result.top1 is not None:
+        return f"Ambiguo: {result.top1.person_id} ({result.top1.score:.2f})"
+
+    if result.top1 is not None:
+        return f"Desconocido ({result.top1.score:.2f})"
+    return "Desconocido"
+
+
+def _build_unknown_face_label(result: RecognitionResult, unknown_index: int) -> str:
+    base = "Desconocido"
+    if unknown_index > 0:
+        base = f"Desconocido {unknown_index}"
+    if result.top1 is not None:
+        return f"{base} ({result.top1.score:.2f})"
+    return base
+
+
+def _assign_unknown_label_id(state: DisplayState, track_id: str, now_ts: float) -> int:
+    existing = state.unknown_label_by_track.get(track_id)
+    if existing is not None:
+        state.unknown_last_seen_ts_by_track[track_id] = now_ts
+        return existing
+
+    idx = max(1, int(state.next_unknown_label_id))
+    state.next_unknown_label_id = idx + 1
+    state.unknown_label_by_track[track_id] = idx
+    state.unknown_last_seen_ts_by_track[track_id] = now_ts
+    return idx
+
+
+def _cleanup_unknown_track_labels(
+    state: DisplayState,
+    now_ts: float,
+    ttl_seconds: float,
+    active_unknown_track_ids: set[str],
+) -> None:
+    if ttl_seconds <= 0.0:
+        return
+
+    stale_tracks: list[str] = []
+    for track_id, last_seen in state.unknown_last_seen_ts_by_track.items():
+        if track_id in active_unknown_track_ids:
+            continue
+        if (now_ts - float(last_seen)) >= ttl_seconds:
+            stale_tracks.append(track_id)
+
+    for track_id in stale_tracks:
+        state.unknown_last_seen_ts_by_track.pop(track_id, None)
+        state.unknown_label_by_track.pop(track_id, None)
 
 
 def _enroll_current_frame(
@@ -933,6 +1284,7 @@ def _guided_enroll_step(
     thresholds: QualityGateThresholds,
     args: argparse.Namespace,
 ) -> None:
+    display_state.face_overlays = []
     detected = _extract_face_observation(
         frame=frame,
         services=services,
@@ -1065,6 +1417,7 @@ def _fmt_num(value: float | None) -> str:
 
 
 def _draw_overlay(frame, state: DisplayState) -> None:
+    _draw_face_overlays(frame, state.face_overlays)
     _draw_landmarks(frame, state.landmarks)
     _draw_gate_border(frame, state.gate_status)
     h = frame.shape[0]
@@ -1072,6 +1425,7 @@ def _draw_overlay(frame, state: DisplayState) -> None:
     line1 = "Decision: N/A"
     line2 = "Top1: N/A"
     line3 = "Latency: N/A"
+    line4 = "FPS: N/A"
 
     if state.result is not None:
         line1 = f"Decision: {state.result.decision}"
@@ -1079,10 +1433,13 @@ def _draw_overlay(frame, state: DisplayState) -> None:
             line2 = f"Top1: {state.result.top1.person_id} ({state.result.top1.score:.3f})"
         if state.latency_ms is not None:
             line3 = f"Latency: {state.latency_ms:.1f} ms"
+    if state.fps is not None:
+        line4 = f"FPS: {state.fps:.1f}"
 
     cv2.putText(frame, line1, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
     cv2.putText(frame, line2, (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 0), 2)
     cv2.putText(frame, line3, (10, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+    cv2.putText(frame, line4, (10, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (180, 255, 180), 2)
 
     if state.gate_status is not None:
         gate = state.gate_status.upper()
@@ -1091,7 +1448,7 @@ def _draw_overlay(frame, state: DisplayState) -> None:
         cv2.putText(
             frame,
             f"Gate: {gate} | now:{current} -> target:{target}",
-            (10, 112),
+            (10, 140),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             (80, 255, 80),
@@ -1100,7 +1457,7 @@ def _draw_overlay(frame, state: DisplayState) -> None:
         cv2.putText(
             frame,
             state.gate_reason,
-            (10, 138),
+            (10, 166),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.55,
             (160, 255, 160),
@@ -1109,7 +1466,7 @@ def _draw_overlay(frame, state: DisplayState) -> None:
         cv2.putText(
             frame,
             f"{state.gate_progress} | {state.gate_pose}",
-            (10, 164),
+            (10, 192),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.50,
             (190, 240, 190),
@@ -1120,6 +1477,41 @@ def _draw_overlay(frame, state: DisplayState) -> None:
 
     if state.message and time.time() <= state.message_until_ts:
         cv2.putText(frame, state.message, (10, h - 44), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
+
+
+def _draw_face_overlays(frame, overlays: list[FaceOverlay]) -> None:
+    for overlay in overlays:
+        _draw_landmarks(frame, overlay.landmarks)
+        x1, y1, x2, y2 = overlay.bbox
+        color = _proximity_color(overlay.in_range)
+        y_text = max(18, y1 - 8)
+        text = overlay.label
+        if overlay.face_ratio is not None:
+            text = f"{overlay.label} [{overlay.face_ratio:.3f}]"
+        cv2.putText(
+            frame,
+            text,
+            (x1, y_text),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            color,
+            2,
+            lineType=cv2.LINE_AA,
+        )
+
+
+def _is_in_face_ratio_range(face_ratio: float | None, min_face_ratio: float) -> bool:
+    if min_face_ratio <= 0.0:
+        return True
+    if face_ratio is None:
+        return False
+    return float(face_ratio) >= float(min_face_ratio)
+
+
+def _proximity_color(in_range: bool) -> tuple[int, int, int]:
+    if in_range:
+        return (0, 255, 0)
+    return (0, 0, 255)
 
 
 def _draw_gate_border(frame, gate_status: str | None) -> None:

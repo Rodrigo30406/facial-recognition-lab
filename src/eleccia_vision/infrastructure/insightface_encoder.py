@@ -58,27 +58,19 @@ class InsightFaceEncoder(FaceEncoder):
             return []
         return detected.landmarks
 
+    def analyze_faces(self, image: np.ndarray, max_points: int = 106) -> list[DetectedFace]:
+        faces = self._app.get(image)
+        if not faces:
+            return []
+        return [_to_detected_face(face, max_points=max_points) for face in faces]
+
     def analyze_face(self, image: np.ndarray, max_points: int = 106) -> DetectedFace | None:
         faces = self._app.get(image)
         if not faces:
             return None
 
         best_face = _pick_best_face(faces)
-        bbox_raw = _read_attr(best_face, "bbox", [0.0, 0.0, 0.0, 0.0])
-        bbox_vals = list(bbox_raw)[:4] if bbox_raw is not None else [0.0, 0.0, 0.0, 0.0]
-        bbox = tuple(float(v) for v in bbox_vals)
-        pose = _read_attr(best_face, "pose")
-        yaw, pitch, roll = _parse_pose(pose)
-        det_score = float(_read_attr(best_face, "det_score", 0.0))
-        landmarks = _extract_landmarks(best_face, max_points=max_points)
-        return DetectedFace(
-            bbox=bbox,
-            det_score=det_score,
-            yaw=yaw,
-            pitch=pitch,
-            roll=roll,
-            landmarks=landmarks,
-        )
+        return _to_detected_face(best_face, max_points=max_points)
 
 
 def _decode_image(image_bytes: bytes) -> np.ndarray:
@@ -116,6 +108,24 @@ def _extract_embedding(face: Any) -> np.ndarray:
     if vector.size == 0:
         raise ValueError("Empty embedding produced by InsightFace")
     return _l2_normalize(vector)
+
+
+def _to_detected_face(face: Any, max_points: int) -> DetectedFace:
+    bbox_raw = _read_attr(face, "bbox", [0.0, 0.0, 0.0, 0.0])
+    bbox_vals = list(bbox_raw)[:4] if bbox_raw is not None else [0.0, 0.0, 0.0, 0.0]
+    bbox = tuple(float(v) for v in bbox_vals)
+    pose = _read_attr(face, "pose")
+    yaw, pitch, roll = _parse_pose(pose)
+    det_score = float(_read_attr(face, "det_score", 0.0))
+    landmarks = _extract_landmarks(face, max_points=max_points)
+    return DetectedFace(
+        bbox=bbox,
+        det_score=det_score,
+        yaw=yaw,
+        pitch=pitch,
+        roll=roll,
+        landmarks=landmarks,
+    )
 
 
 def _extract_landmarks(face: Any, max_points: int) -> list[tuple[int, int]]:
