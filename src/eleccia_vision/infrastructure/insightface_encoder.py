@@ -18,6 +18,7 @@ class DetectedFace:
     pitch: float | None
     roll: float | None
     landmarks: list[tuple[int, int]]
+    embedding: list[float] | None = None
 
 
 class InsightFaceEncoder(FaceEncoder):
@@ -118,6 +119,11 @@ def _to_detected_face(face: Any, max_points: int) -> DetectedFace:
     yaw, pitch, roll = _parse_pose(pose)
     det_score = float(_read_attr(face, "det_score", 0.0))
     landmarks = _extract_landmarks(face, max_points=max_points)
+    embedding: list[float] | None = None
+    try:
+        embedding = _extract_embedding(face).tolist()
+    except Exception:
+        embedding = None
     return DetectedFace(
         bbox=bbox,
         det_score=det_score,
@@ -125,6 +131,7 @@ def _to_detected_face(face: Any, max_points: int) -> DetectedFace:
         pitch=pitch,
         roll=roll,
         landmarks=landmarks,
+        embedding=embedding,
     )
 
 
@@ -153,7 +160,9 @@ def _parse_pose(pose: Any) -> tuple[float | None, float | None, float | None]:
     arr = np.asarray(pose, dtype=np.float32).reshape(-1)
     if arr.size < 3:
         return None, None, None
-    return float(arr[0]), float(arr[1]), float(arr[2])
+    # InsightFace sets face['pose'] as [pitch, yaw, roll].
+    # Our pipeline uses (yaw, pitch, roll), so we swap the first two axes here.
+    return float(arr[1]), float(arr[0]), float(arr[2])
 
 
 def _l2_normalize(vector: np.ndarray) -> np.ndarray:
