@@ -13,17 +13,10 @@ from __future__ import annotations
 
 import argparse
 import os
-import queue
-import shutil
-import subprocess
 import sys
-import tempfile
-import threading
 import time
-import wave
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import cv2
 import numpy as np
@@ -46,6 +39,7 @@ from facial_recognition.application.quality_gate import (
 from facial_recognition.bootstrap import build_services
 from facial_recognition.domain.entities import RecognitionResult
 from facial_recognition.infrastructure.insightface_encoder import DetectedFace
+from facial_recognition.voice import VoiceAssistant, build_voice_settings_from_args
 
 
 @dataclass
@@ -75,225 +69,6 @@ class GuidedEnrollState:
     captured_total: int = 0
     last_capture_ts_ms: float = 0.0
     completed: bool = False
-
-
-@dataclass
-class GreetingState:
-    current_person_id: str | None = None
-    greeted_in_presence: bool = False
-    last_seen_ts: float = 0.0
-    last_greet_ts_by_person: dict[str, float] = field(default_factory=dict)
-    person_name_cache: dict[str, str] = field(default_factory=dict)
-    backend_warning_shown: bool = False
-
-
-@dataclass(frozen=True)
-class VoiceBackend:
-    kind: str
-    engine: Any | None = None
-
-
-class _Pyttsx3Speaker:
-    def __init__(
-        self,
-        rate: int | None = None,
-        volume: float | None = None,
-        voice_id: str | None = None,
-        voice_lang: str | None = None,
-    ) -> None:
-        self._rate = rate
-        self._volume = volume
-        self._voice_id = voice_id
-        self._voice_lang = voice_lang
-        self._queue: queue.SimpleQueue[str | None] = queue.SimpleQueue()
-        self._ready = threading.Event()
-        self._failed = False
-        self._thread = threading.Thread(target=self._run, name="pyttsx3-speaker", daemon=True)
-        self._thread.start()
-        self._ready.wait(timeout=2.0)
-
-    def _run(self) -> None:
-        try:
-            import pyttsx3
-
-            engine = pyttsx3.init()
-            if self._rate is not None:
-                engine.setProperty("rate", int(self._rate))
-            if self._volume is not None:
-                vol = min(1.0, max(0.0, float(self._volume)))
-                engine.setProperty("volume", vol)
-            if self._voice_id:
-                engine.setProperty("voice", self._voice_id)
-            elif self._voice_lang:
-                voice = _select_pyttsx3_voice(engine, self._voice_lang)
-                if voice is not None:
-                    engine.setProperty("voice", voice)
-        except Exception:
-            self._failed = True
-            self._ready.set()
-            return
-
-        self._ready.set()
-        while True:
-            message = self._queue.get()
-            if message is None:
-                break
-            try:
-                engine.say(message)
-                engine.runAndWait()
-            except Exception:
-                continue
-
-        try:
-            engine.stop()
-        except Exception:
-            pass
-
-    def enqueue(self, message: str) -> bool:
-        if self._failed:
-            return False
-        self._queue.put(message)
-        return True
-
-    def close(self) -> None:
-        self._queue.put(None)
-        self._thread.join(timeout=1.0)
-
-
-class _ChatTTSSpeaker:
-    def __init__(self, voice_seed: int | None = None) -> None:
-        self._voice_seed = voice_seed
-        self._queue: queue.SimpleQueue[str | None] = queue.SimpleQueue()
-        self._ready = threading.Event()
-        self._failed = False
-        self._thread = threading.Thread(target=self._run, name="chattts-speaker", daemon=True)
-        self._thread.start()
-        self._ready.wait(timeout=20.0)
-
-    def _run(self) -> None:
-        try:
-            import ChatTTS
-            import torch
-        except Exception:
-            self._failed = True
-            self._ready.set()
-            return
-
-        sounddevice = None
-        try:
-            import sounddevice as sd  # type: ignore
-
-            sounddevice = sd
-        except Exception:
-            sounddevice = None
-
-        player = None if sounddevice is not None else _detect_audio_player()
-        if sounddevice is None and player is None:
-            self._failed = True
-            self._ready.set()
-            return
-
-        try:
-            if self._voice_seed is not None:
-                torch.manual_seed(int(self._voice_seed))
-
-            chat = ChatTTS.Chat()
-            chat.load(compile=False)
-            speaker_emb = chat.sample_random_speaker()
-            infer_params = ChatTTS.Chat.InferCodeParams(
-                spk_emb=speaker_emb,
-            )
-        except Exception:
-            self._failed = True
-            self._ready.set()
-            return
-
-        self._ready.set()
-        while True:
-            message = self._queue.get()
-            if message is None:
-                break
-            try:
-                wavs = chat.infer(
-                    [message],
-                    params_infer_code=infer_params,
-                )
-                if not wavs:
-                    continue
-                audio = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
-                _play_audio(
-                    audio=audio,
-                    sample_rate=24000,
-                    sounddevice=sounddevice,
-                    player=player,
-                )
-            except Exception:
-                continue
-
-    def enqueue(self, message: str) -> bool:
-        if self._failed:
-            return False
-        self._queue.put(message)
-        return True
-
-    def close(self) -> None:
-        self._queue.put(None)
-        self._thread.join(timeout=1.0)
-
-
-def _detect_audio_player() -> list[str] | None:
-    if shutil.which("paplay"):
-        return ["paplay"]
-    if shutil.which("aplay"):
-        return ["aplay"]
-    if shutil.which("ffplay"):
-        return ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet"]
-    return None
-
-
-def _play_audio(
-    audio: np.ndarray,
-    sample_rate: int,
-    sounddevice: Any | None,
-    player: list[str] | None,
-) -> None:
-    if sounddevice is not None:
-        try:
-            sounddevice.play(audio, sample_rate, blocking=True)
-            sounddevice.stop()
-            return
-        except Exception:
-            pass
-
-    if player is None:
-        return
-
-    clipped = np.clip(audio, -1.0, 1.0)
-    pcm16 = (clipped * 32767.0).astype(np.int16)
-
-    tmp_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
-            tmp_path = tmp_file.name
-
-        with wave.open(tmp_path, "wb") as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(sample_rate)
-            wf.writeframes(pcm16.tobytes())
-
-        subprocess.run(
-            [*player, tmp_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    finally:
-        if tmp_path:
-            try:
-                Path(tmp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
 
 
 @dataclass(frozen=True)
@@ -446,7 +221,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--voice-backend",
-        choices=("auto", "pyttsx3", "spd-say", "espeak", "chattts"),
+        choices=("auto", "melotts", "chattts", "pyttsx3", "spd-say", "espeak"),
         default="auto",
         help="TTS backend to use when --voice-greet is enabled",
     )
@@ -469,6 +244,12 @@ def parse_args() -> argparse.Namespace:
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--voice-min-face-ratio",
+        type=float,
+        default=0.0,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--voice-rate",
         type=int,
         default=None,
@@ -488,6 +269,30 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--voice-lang",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--melo-language",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--melo-speaker",
+        type=str,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--melo-speed",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--melo-device",
         type=str,
         default=None,
         help=argparse.SUPPRESS,
@@ -667,6 +472,15 @@ def _apply_demo_env_defaults(args: argparse.Namespace, argv: list[str]) -> None:
     )
     _apply_env_value(
         args=args,
+        attr="voice_min_face_ratio",
+        env_key="DEMO_VOICE_MIN_FACE_RATIO",
+        parser=_to_float,
+        argv=argv,
+        flag="--voice-min-face-ratio",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
         attr="voice_rate",
         env_key="DEMO_VOICE_RATE",
         parser=_to_int,
@@ -699,6 +513,42 @@ def _apply_demo_env_defaults(args: argparse.Namespace, argv: list[str]) -> None:
         parser=_to_optional_str,
         argv=argv,
         flag="--voice-lang",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="melo_language",
+        env_key="DEMO_MELO_LANGUAGE",
+        parser=_to_optional_str,
+        argv=argv,
+        flag="--melo-language",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="melo_speaker",
+        env_key="DEMO_MELO_SPEAKER",
+        parser=_to_optional_str,
+        argv=argv,
+        flag="--melo-speaker",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="melo_speed",
+        env_key="DEMO_MELO_SPEED",
+        parser=_to_float,
+        argv=argv,
+        flag="--melo-speed",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="melo_device",
+        env_key="DEMO_MELO_DEVICE",
+        parser=_to_optional_str,
+        argv=argv,
+        flag="--melo-device",
         file_values=file_values,
     )
 
@@ -809,9 +659,11 @@ def _to_guided_preset(raw: str) -> str:
 
 def _to_voice_backend(raw: str) -> str:
     value = raw.strip().lower()
-    allowed = {"auto", "pyttsx3", "spd-say", "espeak", "chattts"}
+    allowed = {"auto", "melotts", "chattts", "pyttsx3", "spd-say", "espeak"}
     if value not in allowed:
-        raise ValueError("DEMO_VOICE_BACKEND must be one of: auto, pyttsx3, spd-say, espeak, chattts")
+        raise ValueError(
+            "DEMO_VOICE_BACKEND must be one of: auto, melotts, chattts, pyttsx3, spd-say, espeak"
+        )
     return value
 
 
@@ -845,8 +697,7 @@ def main() -> None:
     services = build_services()
     guided_state = _build_guided_enroll_state(args)
     gate_thresholds = _build_gate_thresholds(args)
-    greeting_state = GreetingState()
-    voice_backend = _build_voice_backend(args)
+    voice_assistant = VoiceAssistant(build_voice_settings_from_args(args))
 
     cap = cv2.VideoCapture(args.camera_index)
     if not cap.isOpened():
@@ -868,10 +719,12 @@ def main() -> None:
         if not args.enroll_person_id:
             print("- Warning: guided mode needs --enroll-person-id to auto-capture")
     if args.voice_greet:
-        if voice_backend is not None:
-            print(f"- Voice greet enabled ({voice_backend.kind})")
+        if voice_assistant.backend_kind is not None:
+            print(f"- Voice greet enabled ({voice_assistant.backend_kind})")
         else:
-            print("- Voice greet enabled but no TTS backend found (pyttsx3/spd-say/espeak/chattts)")
+            print("- Voice greet enabled but no TTS backend found (melotts/chattts/pyttsx3/spd-say/espeak)")
+            if voice_assistant.backend_error:
+                print(f"- Voice backend detail: {voice_assistant.backend_error}")
 
     state = DisplayState()
     frame_idx = 0
@@ -891,9 +744,7 @@ def main() -> None:
                     services=services,
                     state=state,
                     camera_id=args.camera_id,
-                    args=args,
-                    greeting_state=greeting_state,
-                    voice_backend=voice_backend,
+                    voice_assistant=voice_assistant,
                 )
             if args.guided_enroll:
                 _guided_enroll_step(
@@ -916,7 +767,7 @@ def main() -> None:
             if key == ord("e") and args.enroll_person_id:
                 _enroll_current_frame(frame, services, state, args.enroll_person_id, args.camera_id)
     finally:
-        _close_voice_backend(voice_backend)
+        voice_assistant.close()
         cap.release()
         cv2.destroyAllWindows()
 
@@ -926,9 +777,7 @@ def _run_recognition(
     services,
     state: DisplayState,
     camera_id: str,
-    args: argparse.Namespace,
-    greeting_state: GreetingState,
-    voice_backend: VoiceBackend | None,
+    voice_assistant: VoiceAssistant,
 ) -> None:
     payload = _frame_to_jpeg_bytes(frame)
     if payload is None:
@@ -948,268 +797,66 @@ def _run_recognition(
 
     state.result = result
     state.latency_ms = elapsed
-    _handle_voice_greeting(
+    face_ratio, pose_yaw, pose_pitch = _estimate_voice_face_observation(frame=frame, services=services)
+    voice_message = voice_assistant.on_recognition(
         result=result,
-        services=services,
-        state=state,
-        args=args,
-        greeting_state=greeting_state,
-        voice_backend=voice_backend,
+        resolve_person=lambda person_id: _resolve_person_metadata(services, person_id),
+        face_ratio=face_ratio,
+        pose_yaw=pose_yaw,
+        pose_pitch=pose_pitch,
     )
-
-
-def _build_voice_backend(args: argparse.Namespace) -> VoiceBackend | None:
-    if not args.voice_greet:
-        return None
-
-    selected = args.voice_backend
-    if selected == "auto":
-        if _can_import_pyttsx3():
-            selected = "pyttsx3"
-        elif _can_import_chattts():
-            selected = "chattts"
-        elif shutil.which("spd-say"):
-            selected = "spd-say"
-        elif shutil.which("espeak"):
-            selected = "espeak"
-        else:
-            return None
-
-    if selected == "pyttsx3":
-        try:
-            speaker = _Pyttsx3Speaker(
-                rate=args.voice_rate,
-                volume=args.voice_volume,
-                voice_id=args.voice_id,
-                voice_lang=args.voice_lang,
-            )
-            if speaker._failed:
-                return None
-            return VoiceBackend(kind="pyttsx3", engine=speaker)
-        except Exception:
-            return None
-
-    if selected == "spd-say":
-        if shutil.which("spd-say"):
-            return VoiceBackend(kind="spd-say", engine={"lang": args.voice_lang})
-        return None
-
-    if selected == "espeak":
-        if shutil.which("espeak"):
-            return VoiceBackend(kind="espeak", engine={"lang": args.voice_lang})
-        return None
-
-    if selected == "chattts":
-        try:
-            speaker = _ChatTTSSpeaker()
-            if speaker._failed:
-                return None
-            return VoiceBackend(kind="chattts", engine=speaker)
-        except Exception:
-            return None
-
-    return None
-
-
-def _can_import_pyttsx3() -> bool:
-    try:
-        import pyttsx3  # noqa: F401
-
-        return True
-    except Exception:
-        return False
-
-
-def _can_import_chattts() -> bool:
-    try:
-        import ChatTTS  # noqa: F401
-
-        return True
-    except Exception:
-        return False
-
-
-def _handle_voice_greeting(
-    result: RecognitionResult,
-    services,
-    state: DisplayState,
-    args: argparse.Namespace,
-    greeting_state: GreetingState,
-    voice_backend: VoiceBackend | None,
-) -> None:
-    if not args.voice_greet:
-        return
-
-    now = time.time()
-    if result.decision == "known_person" and result.person_id is not None:
-        person_id = result.person_id
-        if greeting_state.current_person_id != person_id:
-            greeting_state.current_person_id = person_id
-            greeting_state.greeted_in_presence = False
-        greeting_state.last_seen_ts = now
-
-        if greeting_state.greeted_in_presence:
-            return
-
-        min_delay = max(0.0, float(args.voice_reentry_delay_seconds))
-        last_greet = greeting_state.last_greet_ts_by_person.get(person_id, 0.0)
-        if (now - last_greet) < min_delay:
-            return
-
-        display_name = _person_display_name(services, greeting_state, person_id)
-        message = _format_voice_message(args.voice_template, display_name, person_id)
-
-        if voice_backend is None:
-            if not greeting_state.backend_warning_shown:
-                greeting_state.backend_warning_shown = True
-                state.message = "Voice greet: instala pyttsx3, espeak/spd-say o ChatTTS"
-                state.message_until_ts = time.time() + 3.0
-            greeting_state.greeted_in_presence = True
-            greeting_state.last_greet_ts_by_person[person_id] = now
-            return
-
-        if _speak_message(voice_backend, message):
-            greeting_state.greeted_in_presence = True
-            greeting_state.last_greet_ts_by_person[person_id] = now
-            state.message = f"Saludo: {message}"
+    if voice_message:
+        state.message = voice_message
+        if voice_message.startswith("Saludo:"):
             state.message_until_ts = time.time() + 2.0
-        return
-
-    if greeting_state.current_person_id is None:
-        return
-
-    absence_seconds = max(0.0, float(args.voice_absence_seconds))
-    if (now - greeting_state.last_seen_ts) >= absence_seconds:
-        greeting_state.current_person_id = None
-        greeting_state.greeted_in_presence = False
+        else:
+            state.message_until_ts = time.time() + 3.0
 
 
-def _person_display_name(services, greeting_state: GreetingState, person_id: str) -> str:
-    cached = greeting_state.person_name_cache.get(person_id)
-    if cached is not None:
-        return cached
-
+def _resolve_person_metadata(services, person_id: str) -> tuple[str, str | None]:
     name = person_id
+    sex: str | None = None
+
     try:
         person = services.person_service.get_person(person_id)
-        if person is not None and person.full_name.strip():
-            name = person.full_name.strip()
     except Exception:
-        name = person_id
+        return name, sex
 
-    greeting_state.person_name_cache[person_id] = name
-    return name
-
-
-def _speak_message(backend: VoiceBackend, message: str) -> bool:
-    try:
-        if backend.kind == "pyttsx3":
-            if not isinstance(backend.engine, _Pyttsx3Speaker):
-                return False
-            return backend.engine.enqueue(message)
-        if backend.kind == "chattts":
-            if not isinstance(backend.engine, _ChatTTSSpeaker):
-                return False
-            return backend.engine.enqueue(message)
-        if backend.kind == "spd-say":
-            lang = None
-            if isinstance(backend.engine, dict):
-                lang = backend.engine.get("lang")
-            cmd = ["spd-say"]
-            if isinstance(lang, str) and lang.strip():
-                cmd.extend(["-l", lang.strip()])
-            cmd.append(message)
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return True
-        if backend.kind == "espeak":
-            lang = None
-            if isinstance(backend.engine, dict):
-                lang = backend.engine.get("lang")
-            cmd = ["espeak"]
-            if isinstance(lang, str) and lang.strip():
-                cmd.extend(["-v", lang.strip()])
-            cmd.append(message)
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            return True
-    except Exception:
-        return False
-    return False
+    if person is not None and isinstance(person.full_name, str) and person.full_name.strip():
+        name = person.full_name.strip()
+    if person is not None and person.sex is not None:
+        raw = str(person.sex).strip()
+        sex = raw if raw else None
+    return name, sex
 
 
-def _close_voice_backend(backend: VoiceBackend | None) -> None:
-    if backend is None:
-        return
-    if backend.kind == "pyttsx3" and isinstance(backend.engine, _Pyttsx3Speaker):
-        backend.engine.close()
-        return
-    if backend.kind == "chattts" and isinstance(backend.engine, _ChatTTSSpeaker):
-        backend.engine.close()
-
-
-def _format_voice_message(template: str, name: str, person_id: str) -> str:
-    try:
-        return template.format(name=name, person_id=person_id)
-    except Exception:
-        return f"Hola {name}"
-
-
-def _select_pyttsx3_voice(engine: Any, language_hint: str) -> str | None:
-    hint = language_hint.strip().lower().replace("-", "_")
-    if not hint:
-        return None
+def _estimate_voice_face_observation(frame, services) -> tuple[float | None, float | None, float | None]:
+    encoder = getattr(services.recognition_service, "_encoder", None)
+    analyze = getattr(encoder, "analyze_face", None)
+    if not callable(analyze):
+        return None, None, None
 
     try:
-        voices = engine.getProperty("voices")
+        detected = analyze(frame, max_points=10)
     except Exception:
-        return None
+        return None, None, None
+    if detected is None:
+        return None, None, None
 
-    for voice in voices:
-        if _voice_matches_hint(voice, hint):
-            voice_id = getattr(voice, "id", None)
-            if isinstance(voice_id, str) and voice_id.strip():
-                return voice_id
-    return None
+    h, w = frame.shape[:2]
+    if h <= 0 or w <= 0:
+        return None, None, None
 
+    x1, y1, x2, y2 = detected.bbox
+    face_w = max(0.0, float(x2) - float(x1))
+    face_h = max(0.0, float(y2) - float(y1))
+    frame_area = float(h * w)
+    if frame_area <= 0.0:
+        return None, None, None
 
-def _voice_matches_hint(voice: Any, hint: str) -> bool:
-    candidates: list[str] = []
-
-    voice_id = getattr(voice, "id", None)
-    if isinstance(voice_id, str):
-        candidates.append(voice_id.lower())
-
-    voice_name = getattr(voice, "name", None)
-    if isinstance(voice_name, str):
-        candidates.append(voice_name.lower())
-
-    langs = getattr(voice, "languages", None)
-    if isinstance(langs, (list, tuple)):
-        for item in langs:
-            if isinstance(item, bytes):
-                try:
-                    decoded = item.decode("utf-8", errors="ignore").lower()
-                except Exception:
-                    decoded = ""
-                if decoded:
-                    candidates.append(decoded)
-            elif isinstance(item, str):
-                candidates.append(item.lower())
-
-    for text in candidates:
-        normalized = text.replace("-", "_")
-        if hint in normalized:
-            return True
-        if hint.startswith("es") and ("spanish" in normalized or "espanol" in normalized):
-            return True
-    return False
+    ratio = (face_w * face_h) / frame_area
+    face_ratio = max(0.0, min(1.0, float(ratio)))
+    return face_ratio, detected.yaw, detected.pitch
 
 
 def _enroll_current_frame(
