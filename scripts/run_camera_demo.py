@@ -65,6 +65,9 @@ class DisplayState:
     face_track_centers: dict[str, tuple[float, float]] = field(default_factory=dict)
     face_track_last_seen_ts: dict[str, float] = field(default_factory=dict)
     next_face_track_id: int = 1
+    person_metadata_cache: dict[str, tuple[str, str | None]] = field(default_factory=dict)
+    last_event_signature_by_track: dict[str, tuple[str, str | None]] = field(default_factory=dict)
+    last_event_ts_by_track: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -815,6 +818,7 @@ def run_demo(args: argparse.Namespace, stop_event: threading.Event | None = None
     state = DisplayState()
     frame_idx = 0
     last_frame_id = 0
+    landmarks_every = max(1, int(args.landmarks_every or 1))
     prev_frame_ts = time.perf_counter()
 
     try:
@@ -855,6 +859,7 @@ def run_demo(args: argparse.Namespace, stop_event: threading.Event | None = None
             last_frame_id = frame_id
 
             frame_idx += 1
+            show_landmarks_now = bool(args.show_landmarks) and (frame_idx % landmarks_every == 0)
             if frame_idx % max(1, args.recognize_every) == 0:
                 _run_recognition(
                     frame=frame,
@@ -864,7 +869,7 @@ def run_demo(args: argparse.Namespace, stop_event: threading.Event | None = None
                     voice_assistant=voice_assistant,
                     min_face_ratio_for_label=max(0.0, float(args.voice_min_face_ratio)),
                     unknown_label_ttl_seconds=max(0.0, float(args.voice_absence_seconds)),
-                    show_landmarks=bool(args.show_landmarks),
+                    show_landmarks=show_landmarks_now,
                 )
             if args.guided_enroll:
                 _guided_enroll_step(
@@ -876,7 +881,7 @@ def run_demo(args: argparse.Namespace, stop_event: threading.Event | None = None
                     args=args,
                 )
 
-            _draw_overlay(frame, state, show_landmarks=bool(args.show_landmarks))
+            _draw_overlay(frame, state, show_landmarks=show_landmarks_now)
             cv2.imshow(args.window_name, frame)
 
             key = cv2.waitKey(1) & 0xFF
@@ -919,6 +924,7 @@ def _run_recognition(
     )
 
     t0 = time.perf_counter()
+    gallery = _load_gallery_candidates(services)
     detected_faces = _analyze_detected_faces(
         frame=frame,
         services=services,
@@ -959,16 +965,18 @@ def _run_recognition(
             frame=frame,
             face=face,
             services=services,
+            gallery=gallery,
         )
         result = services.recognition_consistency_service.stabilize(
             raw,
             stream_id=f"{camera_id}::{track_id}",
         )
-        services.recognition_event_service.record_from_result(
-            result=result,
-            camera_id=camera_id,
-            track_id=track_id,
-        )
+        if _should_record_event(state=state, track_id=track_id, result=result, now_ts=now_ts):
+            services.recognition_event_service.record_from_result(
+                result=result,
+                camera_id=camera_id,
+                track_id=track_id,
+            )
 
         is_trackable = not track_id.startswith("ephemeral-")
         if result.decision == "unknown_person" and is_trackable:
@@ -982,7 +990,7 @@ def _run_recognition(
         elif result.decision == "unknown_person":
             label = _build_unknown_face_label(result=result, unknown_index=0)
         else:
-            label = _build_face_label(services=services, result=result)
+            label = _build_face_label(services=services, state=state, result=result)
         bbox_int = _bbox_to_int(face.bbox, frame_shape=frame.shape)
         face_ratio = _face_ratio_from_bbox(frame=frame, bbox=face.bbox)
         in_range = _is_in_face_ratio_range(
@@ -1051,9 +1059,18 @@ def _run_recognition(
             state.message_until_ts = time.time() + 3.0
 
 
-def _recognize_face_from_detection(frame, face: DetectedFace, services) -> RecognitionResult:
+def _recognize_face_from_detection(
+    frame,
+    face: DetectedFace,
+    services,
+    gallery,
+) -> RecognitionResult:
     if face.embedding:
-        return _recognize_from_probe_embedding(services=services, probe=face.embedding)
+        return _recognize_from_probe_embedding(
+            services=services,
+            probe=face.embedding,
+            gallery=gallery,
+        )
 
     face_payload = _crop_face_to_jpeg_bytes(frame=frame, bbox=face.bbox)
     if face_payload is None:
@@ -1067,9 +1084,8 @@ def _recognize_face_from_detection(frame, face: DetectedFace, services) -> Recog
     return services.recognition_service.recognize(face_payload)
 
 
-def _recognize_from_probe_embedding(services, probe: list[float]) -> RecognitionResult:
+def _recognize_from_probe_embedding(services, probe: list[float], gallery) -> RecognitionResult:
     recognition_service = services.recognition_service
-    gallery = recognition_service._face_repository.list_all()
     if not gallery:
         return RecognitionResult(
             decision="unknown_person",
@@ -1123,6 +1139,11 @@ def _recognize_from_probe_embedding(services, probe: list[float]) -> Recognition
     )
 
 
+def _load_gallery_candidates(services):
+    recognition_service = services.recognition_service
+    return recognition_service._face_repository.list_all()
+
+
 def _is_ambiguous_candidates(
     top1: RecognitionCandidate,
     top2: RecognitionCandidate | None,
@@ -1148,6 +1169,19 @@ def _resolve_person_metadata(services, person_id: str) -> tuple[str, str | None]
         raw = str(person.sex).strip()
         sex = raw if raw else None
     return name, sex
+
+
+def _resolve_person_metadata_cached(
+    services,
+    state: DisplayState,
+    person_id: str,
+) -> tuple[str, str | None]:
+    cached = state.person_metadata_cache.get(person_id)
+    if cached is not None:
+        return cached
+    resolved = _resolve_person_metadata(services=services, person_id=person_id)
+    state.person_metadata_cache[person_id] = resolved
+    return resolved
 
 
 def _estimate_voice_face_observation(frame, services) -> tuple[float | None, float | None, float | None]:
@@ -1312,6 +1346,8 @@ def _cleanup_stale_face_tracks(state: DisplayState, now_ts: float, ttl_seconds: 
     for track_id in stale_tracks:
         state.face_track_last_seen_ts.pop(track_id, None)
         state.face_track_centers.pop(track_id, None)
+        state.last_event_signature_by_track.pop(track_id, None)
+        state.last_event_ts_by_track.pop(track_id, None)
 
 
 def _face_ratio_from_bbox(frame, bbox: tuple[float, float, float, float]) -> float | None:
@@ -1336,9 +1372,9 @@ def _is_trackable_face(
     return float(ratio) >= max(0.0, float(min_ratio))
 
 
-def _build_face_label(services, result: RecognitionResult) -> str:
+def _build_face_label(services, state: DisplayState, result: RecognitionResult) -> str:
     if result.decision == "known_person" and result.person_id is not None:
-        name, _sex = _resolve_person_metadata(services, result.person_id)
+        name, _sex = _resolve_person_metadata_cached(services, state, result.person_id)
         if result.top1 is not None:
             return f"{name} ({result.top1.score:.2f})"
         return name
@@ -1392,6 +1428,30 @@ def _cleanup_unknown_track_labels(
     for track_id in stale_tracks:
         state.unknown_last_seen_ts_by_track.pop(track_id, None)
         state.unknown_label_by_track.pop(track_id, None)
+
+
+def _event_signature(result: RecognitionResult) -> tuple[str, str | None]:
+    top1_person = result.top1.person_id if result.top1 is not None else None
+    return result.decision, top1_person
+
+
+def _should_record_event(
+    state: DisplayState,
+    track_id: str,
+    result: RecognitionResult,
+    now_ts: float,
+    min_interval_seconds: float = 0.8,
+) -> bool:
+    signature = _event_signature(result)
+    prev_signature = state.last_event_signature_by_track.get(track_id)
+    prev_ts = state.last_event_ts_by_track.get(track_id, 0.0)
+
+    if prev_signature == signature and (now_ts - prev_ts) < max(0.0, min_interval_seconds):
+        return False
+
+    state.last_event_signature_by_track[track_id] = signature
+    state.last_event_ts_by_track[track_id] = now_ts
+    return True
 
 
 def _enroll_current_frame(
