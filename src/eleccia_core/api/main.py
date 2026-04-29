@@ -1,9 +1,4 @@
 from datetime import datetime
-import os
-from pathlib import Path
-import shlex
-import subprocess
-import sys
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 
@@ -20,6 +15,7 @@ from eleccia_core.api.schemas import (
 from eleccia_vision.application.enrollment import InvalidImageError, PersonNotFoundError
 from eleccia_vision.application.persons import InvalidPersonSexError, PersonAlreadyExistsError
 from eleccia_core.bootstrap import build_services
+from eleccia_core.runtime import build_identification_runtime_for_api
 
 app = FastAPI(title="Facial Recognition API", version="0.1.0")
 services = build_services()
@@ -27,76 +23,21 @@ services = build_services()
 
 @app.on_event("startup")
 def _startup_identification_runtime() -> None:
-    if not _env_bool("ELECCIA_AUTO_START_IDENTIFICATION", default=False):
+    runtime = build_identification_runtime_for_api()
+    if runtime is None:
         return
 
-    command = _build_identification_command()
-    if not command:
-        return
-
-    try:
-        process = subprocess.Popen(
-            command,
-            cwd=str(_repo_root()),
-        )
-    except Exception as exc:
-        print(f"[eleccia] failed to start identification runtime: {exc}")
-        return
-
-    app.state.identification_process = process
-    print(f"[eleccia] identification runtime started: {' '.join(command)}")
+    app.state.identification_runtime = runtime
+    runtime.start()
 
 
 @app.on_event("shutdown")
 def _shutdown_identification_runtime() -> None:
-    process = getattr(app.state, "identification_process", None)
-    if process is None:
+    runtime = getattr(app.state, "identification_runtime", None)
+    if runtime is None:
         return
 
-    if process.poll() is not None:
-        return
-
-    try:
-        process.terminate()
-        process.wait(timeout=5.0)
-    except Exception:
-        try:
-            process.kill()
-        except Exception:
-            pass
-
-
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parents[3]
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    value = raw.strip().lower()
-    if value in {"1", "true", "yes", "on"}:
-        return True
-    if value in {"0", "false", "no", "off"}:
-        return False
-    return default
-
-
-def _build_identification_command() -> list[str]:
-    raw_command = os.getenv("ELECCIA_IDENTIFICATION_CMD")
-    if raw_command and raw_command.strip():
-        return shlex.split(raw_command.strip())
-
-    script = _repo_root() / "scripts" / "run_camera_demo.py"
-    if not script.exists():
-        print(f"[eleccia] identification script not found: {script}")
-        return []
-
-    command = [sys.executable, str(script)]
-    raw_args = os.getenv("ELECCIA_IDENTIFICATION_ARGS", "").strip()
-    if raw_args:
-        command.extend(shlex.split(raw_args))
-    return command
+    runtime.stop()
 
 
 @app.get("/health")

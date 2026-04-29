@@ -26,4 +26,6 @@ uvicorn[standard]
 python-multipart
 pyttsx3
 sounddevice
+faster-whisper
+openwakeword
 melotts @ git+https://github.com/myshell-ai/MeloTTS.git

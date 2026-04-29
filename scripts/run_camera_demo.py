@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -158,7 +159,71 @@ GUIDED_PRESETS: dict[str, GuidedPreset] = {
 TRACKING_MIN_FACE_RATIO = 0.0035
 
 
-def parse_args() -> argparse.Namespace:
+class LatestFrameGrabber:
+    """Continuously captures frames and keeps only the newest one."""
+
+    def __init__(self, camera_index: int) -> None:
+        self._camera_index = int(camera_index)
+        self._cap: cv2.VideoCapture | None = None
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._latest_frame: np.ndarray | None = None
+        self._latest_frame_id = 0
+        self._latest_error_ts = 0.0
+
+    def start(self) -> None:
+        cap = cv2.VideoCapture(self._camera_index)
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open camera index {self._camera_index}")
+
+        # Best effort: many backends ignore this, but it helps when supported.
+        try:
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+
+        self._cap = cap
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, name="camera-grabber", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.5)
+            self._thread = None
+        cap = self._cap
+        self._cap = None
+        if cap is not None:
+            cap.release()
+
+    def get_latest(self) -> tuple[int, np.ndarray] | None:
+        with self._lock:
+            if self._latest_frame is None:
+                return None
+            return self._latest_frame_id, self._latest_frame.copy()
+
+    def _run(self) -> None:
+        cap = self._cap
+        if cap is None:
+            return
+        while not self._stop_event.is_set():
+            ok, frame = cap.read()
+            if not ok:
+                now = time.time()
+                if (now - self._latest_error_ts) > 2.0:
+                    self._latest_error_ts = now
+                    print("[camera] frame read failed; retrying...")
+                time.sleep(0.02)
+                continue
+
+            with self._lock:
+                self._latest_frame = frame
+                self._latest_frame_id += 1
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Webcam demo for facial recognition")
     parser.add_argument("--camera-index", type=int, default=0, help="OpenCV camera index")
     parser.add_argument("--camera-id", type=str, default="cam-01", help="Camera identifier")
@@ -317,9 +382,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=argparse.SUPPRESS,
     )
-    argv = sys.argv[1:]
-    args = parser.parse_args()
-    _apply_demo_env_defaults(args, argv)
+    parsed_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(parsed_argv)
+    _apply_demo_env_defaults(args, parsed_argv)
     _apply_guided_preset(args)
     return args
 
@@ -712,16 +777,17 @@ def _pick_arg(current, fallback):
     return current
 
 
-def main() -> None:
-    args = parse_args()
+def run_demo(args: argparse.Namespace, stop_event: threading.Event | None = None) -> None:
     services = build_services()
     guided_state = _build_guided_enroll_state(args)
     gate_thresholds = _build_gate_thresholds(args)
     voice_assistant = VoiceAssistant(build_voice_settings_from_args(args))
 
-    cap = cv2.VideoCapture(args.camera_index)
-    if not cap.isOpened():
-        raise SystemExit(f"Could not open camera index {args.camera_index}")
+    frame_grabber = LatestFrameGrabber(args.camera_index)
+    try:
+        frame_grabber.start()
+    except Exception as exc:
+        raise SystemExit(str(exc))
 
     print("Camera demo started")
     print("- Press 'q' to quit")
@@ -748,10 +814,13 @@ def main() -> None:
 
     state = DisplayState()
     frame_idx = 0
+    last_frame_id = 0
     prev_frame_ts = time.perf_counter()
 
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                break
             now_ts = time.perf_counter()
             dt = now_ts - prev_frame_ts
             prev_frame_ts = now_ts
@@ -762,11 +831,28 @@ def main() -> None:
                 else:
                     state.fps = (state.fps * 0.85) + (instant_fps * 0.15)
 
-            ok, frame = cap.read()
-            if not ok:
+            latest = frame_grabber.get_latest()
+            if latest is None:
                 state.message = "Failed to read frame"
                 state.message_until_ts = time.time() + 2.0
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                if stop_event is not None and stop_event.is_set():
+                    break
+                time.sleep(0.01)
                 continue
+            frame_id, frame = latest
+            if frame_id == last_frame_id:
+                # No new frame available yet; avoid re-processing stale data.
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+                if stop_event is not None and stop_event.is_set():
+                    break
+                time.sleep(0.002)
+                continue
+            last_frame_id = frame_id
 
             frame_idx += 1
             if frame_idx % max(1, args.recognize_every) == 0:
@@ -778,6 +864,7 @@ def main() -> None:
                     voice_assistant=voice_assistant,
                     min_face_ratio_for_label=max(0.0, float(args.voice_min_face_ratio)),
                     unknown_label_ttl_seconds=max(0.0, float(args.voice_absence_seconds)),
+                    show_landmarks=bool(args.show_landmarks),
                 )
             if args.guided_enroll:
                 _guided_enroll_step(
@@ -789,7 +876,7 @@ def main() -> None:
                     args=args,
                 )
 
-            _draw_overlay(frame, state)
+            _draw_overlay(frame, state, show_landmarks=bool(args.show_landmarks))
             cv2.imshow(args.window_name, frame)
 
             key = cv2.waitKey(1) & 0xFF
@@ -799,8 +886,13 @@ def main() -> None:
                 _enroll_current_frame(frame, services, state, args.enroll_person_id, args.camera_id)
     finally:
         voice_assistant.close()
-        cap.release()
+        frame_grabber.stop()
         cv2.destroyAllWindows()
+
+
+def main(argv: list[str] | None = None, stop_event: threading.Event | None = None) -> None:
+    args = parse_args(argv)
+    run_demo(args=args, stop_event=stop_event)
 
 
 def _run_recognition(
@@ -811,6 +903,7 @@ def _run_recognition(
     voice_assistant: VoiceAssistant,
     min_face_ratio_for_label: float,
     unknown_label_ttl_seconds: float,
+    show_landmarks: bool,
 ) -> None:
     now_ts = time.time()
     _cleanup_stale_face_tracks(
@@ -826,7 +919,11 @@ def _run_recognition(
     )
 
     t0 = time.perf_counter()
-    detected_faces = _analyze_detected_faces(frame=frame, services=services, max_points=50)
+    detected_faces = _analyze_detected_faces(
+        frame=frame,
+        services=services,
+        max_points=(50 if show_landmarks else 1),
+    )
     state.face_overlays = []
     state.landmarks = []
 
@@ -914,7 +1011,7 @@ def _run_recognition(
                 in_range=in_range,
                 regreet_armed=regreet_armed,
                 face_ratio=face_ratio,
-                landmarks=face.landmarks,
+                landmarks=(face.landmarks if show_landmarks else []),
             )
         )
 
@@ -1503,30 +1600,21 @@ def _fmt_num(value: float | None) -> str:
     return f"{value:.1f}"
 
 
-def _draw_overlay(frame, state: DisplayState) -> None:
-    _draw_face_overlays(frame, state.face_overlays)
+def _draw_overlay(frame, state: DisplayState, show_landmarks: bool) -> None:
+    _draw_face_overlays(frame, state.face_overlays, show_landmarks=show_landmarks)
     _draw_landmarks(frame, state.landmarks)
     _draw_gate_border(frame, state.gate_status)
     h = frame.shape[0]
 
-    line1 = "Decision: N/A"
-    line2 = "Top1: N/A"
-    line3 = "Latency: N/A"
-    line4 = "FPS: N/A"
-
-    if state.result is not None:
-        line1 = f"Decision: {state.result.decision}"
-        if state.result.top1 is not None:
-            line2 = f"Top1: {state.result.top1.person_id} ({state.result.top1.score:.3f})"
-        if state.latency_ms is not None:
-            line3 = f"Latency: {state.latency_ms:.1f} ms"
+    line_latency = "Latency: N/A"
+    line_fps = "FPS: N/A"
+    if state.latency_ms is not None:
+        line_latency = f"Latency: {state.latency_ms:.1f} ms"
     if state.fps is not None:
-        line4 = f"FPS: {state.fps:.1f}"
+        line_fps = f"FPS: {state.fps:.1f}"
 
-    cv2.putText(frame, line1, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2)
-    cv2.putText(frame, line2, (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 0), 2)
-    cv2.putText(frame, line3, (10, 84), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-    cv2.putText(frame, line4, (10, 112), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (180, 255, 180), 2)
+    cv2.putText(frame, line_latency, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
+    cv2.putText(frame, line_fps, (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (180, 255, 180), 2)
 
     if state.gate_status is not None:
         gate = state.gate_status.upper()
@@ -1566,9 +1654,10 @@ def _draw_overlay(frame, state: DisplayState) -> None:
         cv2.putText(frame, state.message, (10, h - 44), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
 
 
-def _draw_face_overlays(frame, overlays: list[FaceOverlay]) -> None:
+def _draw_face_overlays(frame, overlays: list[FaceOverlay], show_landmarks: bool) -> None:
     for overlay in overlays:
-        _draw_landmarks(frame, overlay.landmarks)
+        if show_landmarks:
+            _draw_landmarks(frame, overlay.landmarks)
         x1, y1, x2, y2 = overlay.bbox
         color = _proximity_color(overlay.in_range, overlay.regreet_armed)
         y_text = max(18, y1 - 8)
