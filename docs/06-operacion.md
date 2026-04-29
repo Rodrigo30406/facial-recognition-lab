@@ -39,6 +39,7 @@ Config relevante en `.env`:
 
 - `ELECCIA_CORE_MODULES=vision,voice,listen`
 - `ELECCIA_IDENTIFICATION_ARGS` para modulo `vision`
+- `ELECCIA_VOICE_ENABLED`, `ELECCIA_VOICE_BACKEND`, `ELECCIA_VOICE_*`, `ELECCIA_MELO_*` para modulo `voice`
 - `ELECCIA_LISTEN_ENABLED=true` habilita listener de comandos
 - `ELECCIA_LISTEN_BACKEND=stdin|whisper|openwakeword_whisper`
 - `ELECCIA_LISTEN_WAKE_WORD=eleccia`
@@ -49,6 +50,7 @@ Config relevante en `.env`:
 - Whisper config: `ELECCIA_LISTEN_WHISPER_*` (ver `.env.example`)
 - openWakeWord config: `ELECCIA_LISTEN_OPENWAKEWORD_*` (ver `.env.example`)
 - Mutex global de audio: `ELECCIA_AUDIO_LOCK_FILE`, `ELECCIA_AUDIO_LOCK_STRICT`, `ELECCIA_AUDIO_LOCK_TIMEOUT_SECONDS`
+- Prefijo `ELECCIA_*`: usado por `eleccia_core` y por `scripts/run_camera_demo.py`
 
 ## STT recomendado (Whisper)
 
@@ -94,13 +96,13 @@ python3 scripts/test_stt_whisper.py \
 
 ## Config fija para demo (.env)
 
-Puedes fijar comportamiento de `run_camera_demo.py` en `.env` con llaves `DEMO_*`.
-Ejemplo: `DEMO_GUIDED_PRESET`, `DEMO_VOICE_GREET`, `DEMO_VOICE_BACKEND`, `DEMO_VOICE_LANG`.
+Puedes fijar comportamiento de `run_camera_demo.py` en `.env` con llaves `ELECCIA_*`.
+Ejemplo: `ELECCIA_GUIDED_PRESET`, `ELECCIA_VOICE_ENABLED`, `ELECCIA_VOICE_BACKEND`, `ELECCIA_VOICE_LANG`.
 
 Prioridad de valores:
 
 - CLI
-- `.env` (`DEMO_*` o `FACIAL_DEMO_*`)
+- `.env` (`ELECCIA_*`)
 - defaults internos
 
 ## Seleccion de encoder por entorno
@@ -116,16 +118,14 @@ cp .env.example .env
 Alternativa: variables de entorno directas:
 
 ```bash
-export ENCODER_BACKEND=insightface
-export INSIGHTFACE_MODEL_NAME=buffalo_l
-export INSIGHTFACE_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider
-export INSIGHTFACE_CTX_ID=0
-export INSIGHTFACE_DET_SIZE=320x320
-export TEMPORAL_CONSISTENCY_ENABLED=true
-export TEMPORAL_MIN_CONSISTENT_FRAMES=3
+export ELECCIA_ENCODER_BACKEND=insightface
+export ELECCIA_INSIGHTFACE_MODEL_NAME=buffalo_l
+export ELECCIA_INSIGHTFACE_PROVIDERS=CUDAExecutionProvider,CPUExecutionProvider
+export ELECCIA_INSIGHTFACE_CTX_ID=0
+export ELECCIA_INSIGHTFACE_DET_SIZE=320x320
+export ELECCIA_TEMPORAL_CONSISTENCY_ENABLED=true
+export ELECCIA_TEMPORAL_MIN_CONSISTENT_FRAMES=3
 ```
-
-Tambien se aceptan variables con prefijo `FACIAL_` (por ejemplo `FACIAL_ENCODER_BACKEND`).
 
 ## Benchmarks disponibles
 
@@ -186,7 +186,7 @@ Puedes activar saludo al detectar `known_person`:
 python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --recognize-every 3 --voice-greet
 ```
 
-Si ya lo dejaste fijo en `.env` (variables `DEMO_*`), basta:
+Si ya lo dejaste fijo en `.env` (variables `ELECCIA_*`), basta:
 
 ```bash
 python3 scripts/run_camera_demo.py
@@ -196,7 +196,7 @@ Comportamiento:
 
 - Saluda solo en la primera deteccion de presencia.
 - Mientras la persona siga en pantalla no repite saludo.
-- Si la persona sale de pantalla por `DEMO_VOICE_ABSENCE_SECONDS` y vuelve, solo saluda si ya paso `DEMO_VOICE_REENTRY_DELAY_SECONDS`.
+- Si la persona sale de pantalla por `ELECCIA_VOICE_ABSENCE_SECONDS` y vuelve, solo saluda si ya paso `ELECCIA_VOICE_REENTRY_DELAY_SECONDS`.
 
 Modo por flags:
 
@@ -205,18 +205,18 @@ Modo por flags:
 
 Valores por config (`.env`):
 
-- `DEMO_VOICE_TEMPLATE`
-- `DEMO_VOICE_REENTRY_DELAY_SECONDS`
-- `DEMO_VOICE_ABSENCE_SECONDS`
-- `DEMO_VOICE_MIN_FACE_RATIO`
-- `DEMO_VOICE_LANG`
-- `DEMO_VOICE_RATE`
-- `DEMO_VOICE_VOLUME`
-- `DEMO_VOICE_ID`
-- `DEMO_MELO_LANGUAGE`
-- `DEMO_MELO_SPEAKER`
-- `DEMO_MELO_SPEED`
-- `DEMO_MELO_DEVICE`
+- `ELECCIA_VOICE_TEMPLATE`
+- `ELECCIA_VOICE_REENTRY_DELAY_SECONDS`
+- `ELECCIA_VOICE_ABSENCE_SECONDS`
+- `ELECCIA_VOICE_MIN_FACE_RATIO`
+- `ELECCIA_VOICE_LANG`
+- `ELECCIA_VOICE_RATE`
+- `ELECCIA_VOICE_VOLUME`
+- `ELECCIA_VOICE_ID`
+- `ELECCIA_MELO_LANGUAGE`
+- `ELECCIA_MELO_SPEAKER`
+- `ELECCIA_MELO_SPEED`
+- `ELECCIA_MELO_DEVICE`
 
 Ejemplo (modo por flags + valores desde `.env`):
 

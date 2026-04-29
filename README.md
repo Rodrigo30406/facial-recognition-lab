@@ -35,7 +35,7 @@ cp .env.example .env
 uvicorn eleccia_core.api.main:app --reload
 ```
 
-Tambien puedes usar variables de entorno directas (`ENCODER_BACKEND=...`) si prefieres no usar `.env`.
+Tambien puedes usar variables de entorno directas (`ELECCIA_ENCODER_BACKEND=...`) si prefieres no usar `.env`.
 
 ## Arranque Embebido (Auto-identificacion)
 
@@ -60,6 +60,8 @@ Control de modulos:
 - `ELECCIA_CORE_MODULES=vision,voice,listen`
 - Modulos soportados hoy: `vision`, `voice`, `listen`
 - `vision` usa `ELECCIA_IDENTIFICATION_ARGS`
+- `voice` usa `ELECCIA_VOICE_*` y `ELECCIA_MELO_*`
+- `run_camera_demo.py` tambien usa prefijo `ELECCIA_*`
 
 Listener de comandos:
 
@@ -118,7 +120,7 @@ Instalacion de wakeword:
 pip install openwakeword
 ```
 
-La consistencia temporal se puede ajustar con `TEMPORAL_CONSISTENCY_ENABLED` y `TEMPORAL_MIN_CONSISTENT_FRAMES`.
+La consistencia temporal se puede ajustar con `ELECCIA_TEMPORAL_CONSISTENCY_ENABLED` y `ELECCIA_TEMPORAL_MIN_CONSISTENT_FRAMES`.
 Para captura de datos guiada con quality gate y angulos, usa `--guided-enroll` en `scripts/run_camera_demo.py`.
 
 Despues de `pip install -e .`, puedes ejecutar scripts sin repetir `PYTHONPATH=src`:
@@ -140,7 +142,7 @@ pip install "melotts @ git+https://github.com/myshell-ai/MeloTTS.git"
 pip install sounddevice
 ```
 
-Tambien puedes fijar defaults del demo en `.env` usando variables `DEMO_*` (ver `.env.example`) y correr solo:
+Tambien puedes fijar defaults del demo en `.env` usando variables `ELECCIA_*` (ver `.env.example`) y correr solo:
 
 ```bash
 python3 scripts/run_camera_demo.py
