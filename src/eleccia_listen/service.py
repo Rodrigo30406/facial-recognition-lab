@@ -570,6 +570,8 @@ def parse_command_text(
             "inicia la camara",
             "enciende camara",
             "enciende la camara",
+            "prende camara",
+            "prende la camara",
             "activa camara",
             "activa la camara",
         ),
