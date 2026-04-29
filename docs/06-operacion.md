@@ -25,7 +25,7 @@ uvicorn eleccia_core.api.main:app
 
 Opcional:
 
-- `ELECCIA_IDENTIFICATION_ARGS`: argumentos extra para `scripts/run_camera_demo.py`.
+- `ELECCIA_IDENTIFICATION_ARGS`: argumentos extra para `scripts/run_vision_runtime.py`.
 
 ## Arranque Core (sin API)
 
@@ -37,10 +37,12 @@ python3 scripts/run_eleccia_core.py
 
 Config relevante en `.env`:
 
-- `ELECCIA_CORE_MODULES=vision,voice,listen`
+- `ELECCIA_CORE_MODULES=vision,voice,listen,mqtt`
 - `ELECCIA_IDENTIFICATION_ARGS` para modulo `vision`
 - `ELECCIA_VOICE_ENABLED`, `ELECCIA_VOICE_BACKEND`, `ELECCIA_VOICE_*`, `ELECCIA_MELO_*` para modulo `voice`
 - `ELECCIA_LISTEN_ENABLED=true` habilita listener de comandos
+- `ELECCIA_MQTT_ENABLED=true` habilita publish de intents al broker MQTT
+- `ELECCIA_MQTT_HOST`, `ELECCIA_MQTT_PORT`, `ELECCIA_MQTT_TOPIC_PREFIX`, `ELECCIA_MQTT_QOS`, `ELECCIA_MQTT_RETAIN`
 - `ELECCIA_LISTEN_BACKEND=stdin|whisper|openwakeword_whisper`
 - `ELECCIA_LISTEN_WAKE_WORD=eleccia`
 - `ELECCIA_LISTEN_WAKE_WORD_ALIASES=elexia,eleksia,elecia`
@@ -50,7 +52,13 @@ Config relevante en `.env`:
 - Whisper config: `ELECCIA_LISTEN_WHISPER_*` (ver `.env.example`)
 - openWakeWord config: `ELECCIA_LISTEN_OPENWAKEWORD_*` (ver `.env.example`)
 - Mutex global de audio: `ELECCIA_AUDIO_LOCK_FILE`, `ELECCIA_AUDIO_LOCK_STRICT`, `ELECCIA_AUDIO_LOCK_TIMEOUT_SECONDS`
-- Prefijo `ELECCIA_*`: usado por `eleccia_core` y por `scripts/run_camera_demo.py`
+- Prefijo `ELECCIA_*`: usado por `eleccia_core` y por `scripts/run_vision_runtime.py`
+
+Topic MQTT de intents:
+
+- `<ELECCIA_MQTT_TOPIC_PREFIX>/events/intent`
+- Payload JSON: `intent`, `text`, `confidence`, `slots`, `timestamp`
+- Acciones internas no dependen de MQTT (ejemplo: `camera_on`/`camera_off` inicia/detiene modulo `vision` localmente).
 
 ## STT recomendado (Whisper)
 
@@ -94,9 +102,9 @@ python3 scripts/test_stt_whisper.py \
   --whisper-vad-filter
 ```
 
-## Config fija para demo (.env)
+## Config fija para runtime (.env)
 
-Puedes fijar comportamiento de `run_camera_demo.py` en `.env` con llaves `ELECCIA_*`.
+Puedes fijar comportamiento de `run_vision_runtime.py` en `.env` con llaves `ELECCIA_*`.
 Ejemplo: `ELECCIA_GUIDED_PRESET`, `ELECCIA_VOICE_ENABLED`, `ELECCIA_VOICE_BACKEND`, `ELECCIA_VOICE_LANG`.
 
 Prioridad de valores:
@@ -138,32 +146,32 @@ export ELECCIA_TEMPORAL_MIN_CONSISTENT_FRAMES=3
 cd /home/labia10/Documentos/JNE/eleccia-asistente-virtual
 conda activate face-lab
 pip install -e ".[dev]"
-python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01
+python3 scripts/run_vision_runtime.py --camera-index 0 --camera-id cam-01
 ```
 
 Con enrolamiento desde la ventana (tecla `e`):
 
 ```bash
-python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice
+python3 scripts/run_vision_runtime.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice
 ```
 
 Con landmarks visuales (overlay):
 
 ```bash
-python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --show-landmarks --landmarks-max-points 20
+python3 scripts/run_vision_runtime.py --camera-index 0 --camera-id cam-01 --show-landmarks --landmarks-max-points 20
 ```
 
 Enrolamiento guiado con quality gate (rojo/amarillo/verde) y cobertura de angulos:
 
 ```bash
-python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice --show-landmarks --guided-enroll --guided-target-samples 12 --guided-hold-frames 3
+python3 scripts/run_vision_runtime.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice --show-landmarks --guided-enroll --guided-target-samples 12 --guided-hold-frames 3
 ```
 
 Preset rapido o estricto para guided mode:
 
 ```bash
-python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice --show-landmarks --guided-enroll --guided-preset fast
-python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice --show-landmarks --guided-enroll --guided-preset strict
+python3 scripts/run_vision_runtime.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice --show-landmarks --guided-enroll --guided-preset fast
+python3 scripts/run_vision_runtime.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice --show-landmarks --guided-enroll --guided-preset strict
 ```
 
 Si defines `--guided-preset`, cualquier threshold manual (`--guided-min-sharpness`, etc.) lo sobreescribe.
@@ -183,13 +191,13 @@ Controles:
 Puedes activar saludo al detectar `known_person`:
 
 ```bash
-python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --recognize-every 3 --voice-greet
+python3 scripts/run_vision_runtime.py --camera-index 0 --camera-id cam-01 --recognize-every 3 --voice-greet
 ```
 
 Si ya lo dejaste fijo en `.env` (variables `ELECCIA_*`), basta:
 
 ```bash
-python3 scripts/run_camera_demo.py
+python3 scripts/run_vision_runtime.py
 ```
 
 Comportamiento:
@@ -197,6 +205,7 @@ Comportamiento:
 - Saluda solo en la primera deteccion de presencia.
 - Mientras la persona siga en pantalla no repite saludo.
 - Si la persona sale de pantalla por `ELECCIA_VOICE_ABSENCE_SECONDS` y vuelve, solo saluda si ya paso `ELECCIA_VOICE_REENTRY_DELAY_SECONDS`.
+- El toggle para saludo en camara runtime es `ELECCIA_VISION_VOICE_GREET` (independiente de `ELECCIA_VOICE_ENABLED` del modulo core).
 
 Modo por flags:
 
@@ -205,6 +214,7 @@ Modo por flags:
 
 Valores por config (`.env`):
 
+- `ELECCIA_VISION_VOICE_GREET`
 - `ELECCIA_VOICE_TEMPLATE`
 - `ELECCIA_VOICE_REENTRY_DELAY_SECONDS`
 - `ELECCIA_VOICE_ABSENCE_SECONDS`
@@ -221,7 +231,7 @@ Valores por config (`.env`):
 Ejemplo (modo por flags + valores desde `.env`):
 
 ```bash
-python3 scripts/run_camera_demo.py --voice-greet --voice-backend melotts
+python3 scripts/run_vision_runtime.py --voice-greet --voice-backend melotts
 ```
 
 Instalacion sugerida para MeloTTS:

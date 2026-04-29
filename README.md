@@ -9,6 +9,7 @@ Arquitectura limpia y reusable para construir pipelines de facial recognition si
 - `src/eleccia_vision/infrastructure`: adaptadores concretos (encoder, repositorio).
 - `src/eleccia_core`: orquestacion general y API HTTP (FastAPI).
 - `src/eleccia_voice`: modulo de voz reutilizable para saludos y futuras skills.
+- `src/eleccia_mqtt`: modulo de bus MQTT para integrar hardware externo.
 - `tests`: pruebas unitarias y de integracion.
 - `docs`: documentacion estandar del proyecto.
 
@@ -57,11 +58,22 @@ python3 scripts/run_eleccia_core.py
 
 Control de modulos:
 
-- `ELECCIA_CORE_MODULES=vision,voice,listen`
-- Modulos soportados hoy: `vision`, `voice`, `listen`
+- `ELECCIA_CORE_MODULES=vision,voice,listen,mqtt`
+- Modulos soportados hoy: `vision`, `voice`, `listen`, `mqtt`
 - `vision` usa `ELECCIA_IDENTIFICATION_ARGS`
+- `vision` usa `ELECCIA_VISION_VOICE_GREET` para saludo dentro de cámara demo
 - `voice` usa `ELECCIA_VOICE_*` y `ELECCIA_MELO_*`
-- `run_camera_demo.py` tambien usa prefijo `ELECCIA_*`
+- `mqtt` publica intents en broker (`ELECCIA_MQTT_*`)
+- `run_vision_runtime.py` tambien usa prefijo `ELECCIA_*`
+
+Bus MQTT (opcional):
+
+- `ELECCIA_MQTT_ENABLED=true`
+- `ELECCIA_MQTT_HOST=127.0.0.1`
+- `ELECCIA_MQTT_PORT=1883`
+- `ELECCIA_MQTT_TOPIC_PREFIX=eleccia`
+- Topic publicado por intent: `<prefix>/events/intent`
+- Payload JSON con `intent`, `text`, `confidence`, `slots`, `timestamp`
 
 Listener de comandos:
 
@@ -121,18 +133,18 @@ pip install openwakeword
 ```
 
 La consistencia temporal se puede ajustar con `ELECCIA_TEMPORAL_CONSISTENCY_ENABLED` y `ELECCIA_TEMPORAL_MIN_CONSISTENT_FRAMES`.
-Para captura de datos guiada con quality gate y angulos, usa `--guided-enroll` en `scripts/run_camera_demo.py`.
+Para captura de datos guiada con quality gate y angulos, usa `--guided-enroll` en `scripts/run_vision_runtime.py`.
 
 Despues de `pip install -e .`, puedes ejecutar scripts sin repetir `PYTHONPATH=src`:
 
 ```bash
-python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice --guided-enroll --guided-preset strict
+python3 scripts/run_vision_runtime.py --camera-index 0 --camera-id cam-01 --enroll-person-id alice --guided-enroll --guided-preset strict
 ```
 
 Saludo por voz opcional en deteccion:
 
 ```bash
-python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01 --recognize-every 3 --voice-greet --voice-backend melotts
+python3 scripts/run_vision_runtime.py --camera-index 0 --camera-id cam-01 --recognize-every 3 --voice-greet --voice-backend melotts
 ```
 
 Para backend MeloTTS, instala en tu entorno:
@@ -142,10 +154,10 @@ pip install "melotts @ git+https://github.com/myshell-ai/MeloTTS.git"
 pip install sounddevice
 ```
 
-Tambien puedes fijar defaults del demo en `.env` usando variables `ELECCIA_*` (ver `.env.example`) y correr solo:
+Tambien puedes fijar defaults del runtime en `.env` usando variables `ELECCIA_*` (ver `.env.example`) y correr solo:
 
 ```bash
-python3 scripts/run_camera_demo.py
+python3 scripts/run_vision_runtime.py
 ```
 
 ## Endpoints base
