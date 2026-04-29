@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 import numpy as np
 
+from eleccia_audio import audio_io_lock
 from eleccia_vision.domain.entities import RecognitionResult
 
 PersonMetadataResolver = Callable[[str], tuple[str, str | None]]
@@ -456,8 +457,9 @@ class _Pyttsx3Speaker:
             if message is None:
                 break
             try:
-                engine.say(message)
-                engine.runAndWait()
+                with audio_io_lock():
+                    engine.say(message)
+                    engine.runAndWait()
             except Exception:
                 continue
 
@@ -705,11 +707,13 @@ def _speak_message(backend: VoiceBackend, message: str) -> bool:
             if isinstance(lang, str) and lang.strip():
                 cmd.extend(["-l", lang.strip()])
             cmd.append(message)
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            with audio_io_lock():
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
             return True
         if backend.kind == "espeak":
             lang = None
@@ -719,11 +723,13 @@ def _speak_message(backend: VoiceBackend, message: str) -> bool:
             if isinstance(lang, str) and lang.strip():
                 cmd.extend(["-v", lang.strip()])
             cmd.append(message)
-            subprocess.Popen(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
+            with audio_io_lock():
+                subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
             return True
     except Exception:
         return False
@@ -813,8 +819,9 @@ def _play_wav_path(path: str, sounddevice: Any | None, player: list[str] | None)
             if n_channels > 1:
                 data = data.reshape(-1, n_channels)
 
-            sounddevice.play(data, framerate, blocking=True)
-            sounddevice.stop()
+            with audio_io_lock():
+                sounddevice.play(data, framerate, blocking=True)
+                sounddevice.stop()
             return
         except Exception:
             pass
@@ -822,12 +829,13 @@ def _play_wav_path(path: str, sounddevice: Any | None, player: list[str] | None)
     if player is None:
         return
 
-    subprocess.run(
-        [*player, path],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+    with audio_io_lock():
+        subprocess.run(
+            [*player, path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
 
 
 def _play_audio(
@@ -838,8 +846,9 @@ def _play_audio(
 ) -> None:
     if sounddevice is not None:
         try:
-            sounddevice.play(audio, sample_rate, blocking=True)
-            sounddevice.stop()
+            with audio_io_lock():
+                sounddevice.play(audio, sample_rate, blocking=True)
+                sounddevice.stop()
             return
         except Exception:
             pass
@@ -861,12 +870,13 @@ def _play_audio(
             wf.setframerate(sample_rate)
             wf.writeframes(pcm16.tobytes())
 
-        subprocess.run(
-            [*player, tmp_path],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
+        with audio_io_lock():
+            subprocess.run(
+                [*player, tmp_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
     finally:
         if tmp_path:
             try:
