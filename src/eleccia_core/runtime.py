@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import os
-import shlex
-import sys
-import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
 from eleccia_listen import CommandEvent, ElecciaListenService, ListenSettings
+from eleccia_vision import ElecciaVisionService, VisionSettings
 from eleccia_voice import ElecciaVoiceService, VoiceSettings
 
 
@@ -67,16 +65,16 @@ class RuntimeSettings:
         return cls(
             modules=modules or ("vision",),
             identification_args=_env_lookup("ELECCIA_IDENTIFICATION_ARGS", file_values) or "",
-            voice_enabled=_env_bool("DEMO_VOICE_GREET", False, file_values),
-            voice_backend=_env_lookup("DEMO_VOICE_BACKEND", file_values) or "auto",
-            voice_lang=_env_lookup("DEMO_VOICE_LANG", file_values),
-            voice_rate=_env_int_optional("DEMO_VOICE_RATE", file_values),
-            voice_volume=_env_float_optional("DEMO_VOICE_VOLUME", file_values),
-            voice_id=_env_lookup("DEMO_VOICE_ID", file_values),
-            melo_language=_env_lookup("DEMO_MELO_LANGUAGE", file_values),
-            melo_speaker=_env_lookup("DEMO_MELO_SPEAKER", file_values),
-            melo_speed=_env_float_optional("DEMO_MELO_SPEED", file_values),
-            melo_device=_env_lookup("DEMO_MELO_DEVICE", file_values),
+            voice_enabled=_env_bool("ELECCIA_VOICE_ENABLED", False, file_values),
+            voice_backend=_env_lookup("ELECCIA_VOICE_BACKEND", file_values) or "auto",
+            voice_lang=_env_lookup("ELECCIA_VOICE_LANG", file_values),
+            voice_rate=_env_int_optional("ELECCIA_VOICE_RATE", file_values),
+            voice_volume=_env_float_optional("ELECCIA_VOICE_VOLUME", file_values),
+            voice_id=_env_lookup("ELECCIA_VOICE_ID", file_values),
+            melo_language=_env_lookup("ELECCIA_MELO_LANGUAGE", file_values),
+            melo_speaker=_env_lookup("ELECCIA_MELO_SPEAKER", file_values),
+            melo_speed=_env_float_optional("ELECCIA_MELO_SPEED", file_values),
+            melo_device=_env_lookup("ELECCIA_MELO_DEVICE", file_values),
             listen_enabled=_env_bool("ELECCIA_LISTEN_ENABLED", False, file_values),
             listen_backend=_env_lookup("ELECCIA_LISTEN_BACKEND", file_values) or "stdin",
             listen_stdin_prompt=_env_lookup("ELECCIA_LISTEN_STDIN_PROMPT", file_values) or "eleccia> ",
@@ -185,53 +183,35 @@ class RuntimeModule(Protocol):
 class VisionIdentificationModule:
     name = "vision"
 
-    def __init__(self, settings: RuntimeSettings, repo_root: Path) -> None:
+    def __init__(self, settings: RuntimeSettings) -> None:
         self._settings = settings
-        self._repo_root = repo_root
-        self._thread: threading.Thread | None = None
-        self._stop_event: threading.Event | None = None
+        self._service: ElecciaVisionService | None = None
 
     @property
     def is_running(self) -> bool:
-        thread = self._thread
-        return bool(thread is not None and thread.is_alive())
+        service = self._service
+        return bool(service is not None and service.is_running)
 
     def start(self) -> None:
         if self.is_running:
             return
-        script = self._repo_root / "scripts" / "run_camera_demo.py"
-        if not script.exists():
-            print(f"[eleccia] vision module skipped: script not found ({script})")
-            return
-
-        argv = shlex.split(self._settings.identification_args.strip()) if self._settings.identification_args else []
-        stop_event = threading.Event()
-
-        def _runner() -> None:
-            try:
-                if str(self._repo_root) not in sys.path:
-                    sys.path.insert(0, str(self._repo_root))
-                from scripts import run_camera_demo as camera_demo
-
-                camera_demo.main(argv=argv, stop_event=stop_event)
-            except Exception as exc:
-                print(f"[eleccia] vision module failed (inprocess): {exc}")
-
-        thread = threading.Thread(target=_runner, name="eleccia-vision-inprocess", daemon=True)
-        self._stop_event = stop_event
-        self._thread = thread
-        thread.start()
+        service = ElecciaVisionService(
+            settings=VisionSettings(
+                enabled=True,
+                identification_args=self._settings.identification_args,
+            )
+        )
+        service.start()
+        self._service = service
         print("[eleccia] vision module started (inprocess service)")
+        if service.last_error:
+            print(f"[eleccia] vision module detail: {service.last_error}")
 
     def stop(self) -> None:
-        stop_event = self._stop_event
-        thread = self._thread
-        if stop_event is not None:
-            stop_event.set()
-        if thread is not None:
-            thread.join(timeout=5.0)
-        self._thread = None
-        self._stop_event = None
+        service = self._service
+        if service is not None:
+            service.stop()
+        self._service = None
 
 
 class VoiceModule:
@@ -384,7 +364,7 @@ class ElecciaRuntime:
         voice_module: VoiceModule | None = None
 
         if "vision" in requested:
-            modules.append(VisionIdentificationModule(settings=self._settings, repo_root=self._repo_root))
+            modules.append(VisionIdentificationModule(settings=self._settings))
 
         if "voice" in requested:
             voice_module = VoiceModule(settings=self._settings)
@@ -429,7 +409,7 @@ def load_env_file_into_environ() -> None:
 
 
 def read_env_file() -> dict[str, str]:
-    env_file = os.getenv("FACIAL_ENV_FILE", ".env")
+    env_file = os.getenv("ELECCIA_ENV_FILE", ".env")
     path = Path(env_file)
     if not path.is_absolute():
         path = _repo_root() / env_file
