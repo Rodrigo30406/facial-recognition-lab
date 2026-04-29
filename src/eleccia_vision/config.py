@@ -32,37 +32,45 @@ class Settings:
         file_values = _read_env_file()
         return cls(
             similarity_threshold=_env_float(
-                "SIMILARITY_THRESHOLD", cls.similarity_threshold, file_values
+                "ELECCIA_SIMILARITY_THRESHOLD", cls.similarity_threshold, file_values
             ),
-            database_url=_env_str("DATABASE_URL", cls.database_url, file_values),
-            sample_storage_dir=_env_str("SAMPLE_STORAGE_DIR", cls.sample_storage_dir, file_values),
+            database_url=_env_str("ELECCIA_DATABASE_URL", cls.database_url, file_values),
+            sample_storage_dir=_env_str("ELECCIA_SAMPLE_STORAGE_DIR", cls.sample_storage_dir, file_values),
             recognition_threshold=_env_float(
-                "RECOGNITION_THRESHOLD", cls.recognition_threshold, file_values
+                "ELECCIA_RECOGNITION_THRESHOLD", cls.recognition_threshold, file_values
             ),
-            recognition_margin=_env_float("RECOGNITION_MARGIN", cls.recognition_margin, file_values),
-            recognition_top_k=_env_int("RECOGNITION_TOP_K", cls.recognition_top_k, file_values),
-            encoder_backend=_env_str("ENCODER_BACKEND", cls.encoder_backend, file_values),
+            recognition_margin=_env_float(
+                "ELECCIA_RECOGNITION_MARGIN",
+                cls.recognition_margin,
+                file_values,
+            ),
+            recognition_top_k=_env_int("ELECCIA_RECOGNITION_TOP_K", cls.recognition_top_k, file_values),
+            encoder_backend=_env_str("ELECCIA_ENCODER_BACKEND", cls.encoder_backend, file_values),
             insightface_model_name=_env_str(
-                "INSIGHTFACE_MODEL_NAME", cls.insightface_model_name, file_values
+                "ELECCIA_INSIGHTFACE_MODEL_NAME", cls.insightface_model_name, file_values
             ),
             insightface_providers=_env_providers(
-                "INSIGHTFACE_PROVIDERS", cls.insightface_providers, file_values
+                "ELECCIA_INSIGHTFACE_PROVIDERS", cls.insightface_providers, file_values
             ),
-            insightface_ctx_id=_env_int("INSIGHTFACE_CTX_ID", cls.insightface_ctx_id, file_values),
+            insightface_ctx_id=_env_int("ELECCIA_INSIGHTFACE_CTX_ID", cls.insightface_ctx_id, file_values),
             insightface_det_size=_env_det_size(
-                "INSIGHTFACE_DET_SIZE", cls.insightface_det_size, file_values
+                "ELECCIA_INSIGHTFACE_DET_SIZE", cls.insightface_det_size, file_values
             ),
             temporal_consistency_enabled=_env_bool(
-                "TEMPORAL_CONSISTENCY_ENABLED", cls.temporal_consistency_enabled, file_values
+                "ELECCIA_TEMPORAL_CONSISTENCY_ENABLED",
+                cls.temporal_consistency_enabled,
+                file_values,
             ),
             temporal_min_consistent_frames=_env_int(
-                "TEMPORAL_MIN_CONSISTENT_FRAMES", cls.temporal_min_consistent_frames, file_values
+                "ELECCIA_TEMPORAL_MIN_CONSISTENT_FRAMES",
+                cls.temporal_min_consistent_frames,
+                file_values,
             ),
         )
 
 
 def _read_env_file() -> dict[str, str]:
-    env_file = os.getenv("FACIAL_ENV_FILE", ".env")
+    env_file = os.getenv("ELECCIA_ENV_FILE", ".env")
     path = Path(env_file)
     if not path.exists() or not path.is_file():
         return {}
@@ -95,15 +103,10 @@ def _strip_optional_quotes(value: str) -> str:
 
 
 def _env_lookup(key: str, file_values: dict[str, str]) -> str | None:
-    prefixed = f"FACIAL_{key}"
     if key in os.environ:
         return os.environ[key]
-    if prefixed in os.environ:
-        return os.environ[prefixed]
     if key in file_values:
         return file_values[key]
-    if prefixed in file_values:
-        return file_values[prefixed]
     return None
 
 
@@ -138,7 +141,7 @@ def _env_bool(key: str, default: bool, file_values: dict[str, str]) -> bool:
     if value in {"0", "false", "no", "off"}:
         return False
     raise ValueError(
-        f"Environment variable '{key}' or 'FACIAL_{key}' must be one of: "
+        f"Environment variable '{key}' must be one of: "
         "1/0, true/false, yes/no, on/off"
     )
 
@@ -153,7 +156,7 @@ def _env_providers(
     parsed = tuple(part.strip() for part in raw.split(",") if part.strip())
     if not parsed:
         raise ValueError(
-            f"Environment variable '{key}' or 'FACIAL_{key}' must contain at least one provider"
+            f"Environment variable '{key}' must contain at least one provider"
         )
     return parsed
 
@@ -169,13 +172,13 @@ def _env_det_size(
     parts = [part.strip() for part in normalized.split(",") if part.strip()]
     if len(parts) != 2:
         raise ValueError(
-            f"Environment variable '{key}' or 'FACIAL_{key}' must be '<width>,<height>' or "
+            f"Environment variable '{key}' must be '<width>,<height>' or "
             f"'<width>x<height>'"
         )
 
     width, height = int(parts[0]), int(parts[1])
     if width <= 0 or height <= 0:
         raise ValueError(
-            f"Environment variable '{key}' or 'FACIAL_{key}' must use positive integers"
+            f"Environment variable '{key}' must use positive integers"
         )
     return (width, height)

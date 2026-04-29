@@ -214,15 +214,10 @@ def _strip_optional_quotes(value: str) -> str:
 
 
 def _env_lookup(key: str, file_values: dict[str, str]) -> str | None:
-    prefixed = f"FACIAL_{key}"
     if key in os.environ:
         return os.environ[key]
-    if prefixed in os.environ:
-        return os.environ[prefixed]
     if key in file_values:
         return file_values[key]
-    if prefixed in file_values:
-        return file_values[prefixed]
     return None
 
 
@@ -538,7 +533,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--delay-seconds", type=float, default=1.2)
     parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--list-pyttsx3-voices", action="store_true")
-    parser.add_argument("--env-file", type=str, default=".env")
+    parser.add_argument("--env-file", type=str, default=os.getenv("ELECCIA_ENV_FILE", ".env"))
     args = parser.parse_args()
     _apply_env_defaults(args)
     return args
@@ -546,26 +541,26 @@ def parse_args() -> argparse.Namespace:
 
 def _apply_env_defaults(args: argparse.Namespace) -> None:
     file_values = _read_env_file(args.env_file)
-    args.backend = args.backend or (_env_lookup("DEMO_VOICE_BACKEND", file_values) or "auto")
+    args.backend = args.backend or (_env_lookup("ELECCIA_VOICE_BACKEND", file_values) or "auto")
     if args.voice_lang is None:
-        args.voice_lang = _env_lookup("DEMO_VOICE_LANG", file_values)
+        args.voice_lang = _env_lookup("ELECCIA_VOICE_LANG", file_values)
     if args.voice_rate is None:
-        raw = _env_lookup("DEMO_VOICE_RATE", file_values)
+        raw = _env_lookup("ELECCIA_VOICE_RATE", file_values)
         if raw is not None:
             args.voice_rate = int(raw.strip())
     if args.voice_volume is None:
-        raw = _env_lookup("DEMO_VOICE_VOLUME", file_values)
+        raw = _env_lookup("ELECCIA_VOICE_VOLUME", file_values)
         if raw is not None:
             args.voice_volume = float(raw.strip())
     if args.voice_id is None:
-        args.voice_id = _env_lookup("DEMO_VOICE_ID", file_values)
+        args.voice_id = _env_lookup("ELECCIA_VOICE_ID", file_values)
     if args.melo_language is None:
-        raw = _env_lookup("DEMO_MELO_LANGUAGE", file_values) or args.voice_lang or "ES"
+        raw = _env_lookup("ELECCIA_MELO_LANGUAGE", file_values) or args.voice_lang or "ES"
         args.melo_language = _normalize_melo_language(raw)
     if args.melo_speaker is None:
-        args.melo_speaker = _env_lookup("DEMO_MELO_SPEAKER", file_values)
+        args.melo_speaker = _env_lookup("ELECCIA_MELO_SPEAKER", file_values)
     if args.melo_speed is None:
-        raw = _env_lookup("DEMO_MELO_SPEED", file_values)
+        raw = _env_lookup("ELECCIA_MELO_SPEED", file_values)
         if raw is not None:
             args.melo_speed = max(0.1, float(raw.strip()))
         elif args.voice_rate is not None:
@@ -573,7 +568,7 @@ def _apply_env_defaults(args: argparse.Namespace) -> None:
         else:
             args.melo_speed = 1.0
     if args.melo_device is None:
-        args.melo_device = _env_lookup("DEMO_MELO_DEVICE", file_values) or "auto"
+        args.melo_device = _env_lookup("ELECCIA_MELO_DEVICE", file_values) or "auto"
 
 
 def _normalize_melo_language(raw: str) -> str:
