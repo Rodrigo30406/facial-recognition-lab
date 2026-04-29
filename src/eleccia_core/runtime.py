@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from eleccia_listen import CommandEvent, ElecciaListenService, ListenSettings
+from eleccia_mqtt import ElecciaMqttService, MqttSettings
 from eleccia_vision import ElecciaVisionService, VisionSettings
 from eleccia_voice import ElecciaVoiceService, VoiceSettings
 
@@ -55,6 +56,15 @@ class RuntimeSettings:
     listen_wake_word_aliases: tuple[str, ...] = ()
     listen_wake_word_fuzzy_threshold: float = 0.80
     listen_wake_command_window_seconds: float = 6.0
+    mqtt_enabled: bool = False
+    mqtt_host: str = "127.0.0.1"
+    mqtt_port: int = 1883
+    mqtt_username: str | None = None
+    mqtt_password: str | None = None
+    mqtt_client_id: str | None = None
+    mqtt_topic_prefix: str = "eleccia"
+    mqtt_qos: int = 0
+    mqtt_retain: bool = False
 
     @classmethod
     def from_env(cls) -> RuntimeSettings:
@@ -163,6 +173,15 @@ class RuntimeSettings:
                 6.0,
                 file_values,
             ),
+            mqtt_enabled=_env_bool("ELECCIA_MQTT_ENABLED", False, file_values),
+            mqtt_host=_env_lookup("ELECCIA_MQTT_HOST", file_values) or "127.0.0.1",
+            mqtt_port=_env_int("ELECCIA_MQTT_PORT", 1883, file_values),
+            mqtt_username=_env_lookup("ELECCIA_MQTT_USERNAME", file_values),
+            mqtt_password=_env_lookup("ELECCIA_MQTT_PASSWORD", file_values),
+            mqtt_client_id=_env_lookup("ELECCIA_MQTT_CLIENT_ID", file_values),
+            mqtt_topic_prefix=_env_lookup("ELECCIA_MQTT_TOPIC_PREFIX", file_values) or "eleccia",
+            mqtt_qos=_env_int("ELECCIA_MQTT_QOS", 0, file_values),
+            mqtt_retain=_env_bool("ELECCIA_MQTT_RETAIN", False, file_values),
         )
 
 
@@ -203,7 +222,7 @@ class VisionIdentificationModule:
         )
         service.start()
         self._service = service
-        print("[eleccia] vision module started (inprocess service)")
+        print("[eleccia] vision module started (subprocess service)")
         if service.last_error:
             print(f"[eleccia] vision module detail: {service.last_error}")
 
@@ -334,6 +353,69 @@ class ListenModule:
         self._running = False
 
 
+class MqttModule:
+    name = "mqtt"
+
+    def __init__(self, settings: RuntimeSettings) -> None:
+        self._settings = settings
+        self._service: ElecciaMqttService | None = None
+        self._running = False
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    def start(self) -> None:
+        if self._running:
+            return
+        service = ElecciaMqttService(
+            settings=MqttSettings(
+                enabled=self._settings.mqtt_enabled,
+                host=self._settings.mqtt_host,
+                port=self._settings.mqtt_port,
+                username=self._settings.mqtt_username,
+                password=self._settings.mqtt_password,
+                client_id=self._settings.mqtt_client_id,
+                topic_prefix=self._settings.mqtt_topic_prefix,
+                qos=self._settings.mqtt_qos,
+                retain=self._settings.mqtt_retain,
+            )
+        )
+        service.start()
+        self._service = service
+        self._running = True
+
+        if not self._settings.mqtt_enabled:
+            print("[eleccia] mqtt module ready: disabled")
+            return
+        if service.is_running:
+            print(
+                f"[eleccia] mqtt module ready: {self._settings.mqtt_host}:{self._settings.mqtt_port}"
+            )
+            return
+        print("[eleccia] mqtt module failed to connect")
+        if service.last_error:
+            print(f"[eleccia] mqtt detail: {service.last_error}")
+
+    def stop(self) -> None:
+        if self._service is not None:
+            self._service.stop()
+        self._running = False
+
+    def publish_intent(self, event: CommandEvent) -> None:
+        service = self._service
+        if service is None:
+            return
+        ok = service.publish_intent(
+            text=event.text,
+            intent=event.intent.name,
+            confidence=event.intent.confidence,
+            slots=dict(event.intent.slots),
+        )
+        if not ok and self._settings.mqtt_enabled and service.last_error:
+            print(f"[eleccia] mqtt publish failed: {service.last_error}")
+
+
 class ElecciaRuntime:
     def __init__(self, settings: RuntimeSettings, repo_root: Path | None = None) -> None:
         self._settings = settings
@@ -361,24 +443,35 @@ class ElecciaRuntime:
     def _build_modules(self) -> list[RuntimeModule]:
         modules: list[RuntimeModule] = []
         requested = set(self._settings.modules)
+        vision_module: VisionIdentificationModule | None = None
         voice_module: VoiceModule | None = None
+        mqtt_module: MqttModule | None = None
 
         if "vision" in requested:
-            modules.append(VisionIdentificationModule(settings=self._settings))
+            vision_module = VisionIdentificationModule(settings=self._settings)
+            modules.append(vision_module)
 
         if "voice" in requested:
             voice_module = VoiceModule(settings=self._settings)
             modules.append(voice_module)
 
+        if "mqtt" in requested or self._settings.mqtt_enabled:
+            mqtt_module = MqttModule(settings=self._settings)
+            modules.append(mqtt_module)
+
         if "listen" in requested:
             modules.append(
                 ListenModule(
                     settings=self._settings,
-                    on_command=self._build_listen_handler(voice_module=voice_module),
+                    on_command=self._build_listen_handler(
+                        vision_module=vision_module,
+                        voice_module=voice_module,
+                        mqtt_module=mqtt_module,
+                    ),
                 )
             )
 
-        unknown = sorted(requested - {"vision", "voice", "listen"})
+        unknown = sorted(requested - {"vision", "voice", "listen", "mqtt"})
         for name in unknown:
             print(f"[eleccia] unknown module '{name}' (ignored)")
 
@@ -386,18 +479,23 @@ class ElecciaRuntime:
 
     def _build_listen_handler(
         self,
+        vision_module: VisionIdentificationModule | None,
         voice_module: VoiceModule | None,
+        mqtt_module: MqttModule | None,
     ) -> Callable[[CommandEvent], None]:
         def _handler(event: CommandEvent) -> None:
             intent = event.intent.name
             print(f"[eleccia][listen] '{event.text}' -> intent={intent}")
 
-            if voice_module is None:
-                return
+            _apply_internal_intent(intent_name=intent, vision_module=vision_module)
 
-            response = _intent_response(intent)
-            if response is not None:
-                voice_module.speak_text(response)
+            if mqtt_module is not None:
+                mqtt_module.publish_intent(event)
+
+            if voice_module is not None:
+                response = _intent_response(intent)
+                if response is not None:
+                    voice_module.speak_text(response)
 
         return _handler
 
@@ -559,6 +657,20 @@ def _env_tuple_str(key: str, file_values: dict[str, str]) -> tuple[str, ...]:
     if raw is None:
         return ()
     return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _apply_internal_intent(
+    *,
+    intent_name: str,
+    vision_module: VisionIdentificationModule | None,
+) -> None:
+    if vision_module is None:
+        return
+    if intent_name == "camera_on":
+        vision_module.start()
+        return
+    if intent_name == "camera_off":
+        vision_module.stop()
 
 
 def _intent_response(intent_name: str) -> str | None:

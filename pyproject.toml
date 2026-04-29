@@ -13,6 +13,7 @@ dependencies = [
   "fastapi",
   "uvicorn[standard]",
   "python-multipart",
+  "paho-mqtt",
   "pyttsx3",
   "sounddevice",
   "faster-whisper",
