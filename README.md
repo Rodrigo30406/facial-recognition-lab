@@ -47,7 +47,76 @@ export ELECCIA_IDENTIFICATION_ARGS="--camera-index 0 --camera-id cam-01 --recogn
 uvicorn eleccia_core.api.main:app
 ```
 
-Tambien puedes usar `ELECCIA_IDENTIFICATION_CMD` para definir un comando completo.
+## Arranque Core (Sin API)
+
+Para levantar Eleccia Core y activar modulos desde `.env` (recomendado para embebido local):
+
+```bash
+python3 scripts/run_eleccia_core.py
+```
+
+Control de modulos:
+
+- `ELECCIA_CORE_MODULES=vision,voice,listen`
+- Modulos soportados hoy: `vision`, `voice`, `listen`
+- `vision` usa `ELECCIA_IDENTIFICATION_ARGS`
+
+Listener de comandos:
+
+- `ELECCIA_LISTEN_ENABLED=true`
+- `ELECCIA_LISTEN_BACKEND=stdin|whisper|openwakeword_whisper`
+- `ELECCIA_LISTEN_WAKE_WORD=eleccia`
+- `ELECCIA_LISTEN_WAKE_WORD_ALIASES=elexia,eleksia,elecia`
+- `ELECCIA_LISTEN_WAKE_WORD_FUZZY_THRESHOLD=0.80`
+- `ELECCIA_LISTEN_REQUIRE_WAKE_WORD=true`
+- `ELECCIA_LISTEN_WAKE_COMMAND_WINDOW_SECONDS=6.0`
+- `ELECCIA_LISTEN_STDIN_PROMPT="eleccia> "`
+
+Voz a texto (STT) recomendada:
+
+- Libreria recomendada: `faster-whisper` (Whisper optimizado)
+- Ya incluida en dependencias del proyecto (`pyproject.toml`, `requirements.txt`)
+- Instalacion directa opcional:
+
+```bash
+pip install faster-whisper
+```
+
+Perfil sugerido para GPU 48GB (cuando habilites backend whisper en `listen`):
+
+- modelo: `large-v3`
+- compute type: `float16`
+- language: `es`
+- `vad_filter=true`
+
+Demo solo voz->texto:
+
+```bash
+python3 scripts/test_stt_whisper.py --backend whisper --whisper-model large-v3 --whisper-device cuda --whisper-compute-type float16 --whisper-language es --whisper-vad-filter
+```
+
+Demo wake word + Whisper:
+
+```bash
+python3 scripts/test_stt_whisper.py \
+  --backend openwakeword_whisper \
+  --openwakeword-model-paths /abs/path/eleccia.onnx \
+  --openwakeword-threshold 0.5 \
+  --whisper-model large-v3 \
+  --whisper-device cuda \
+  --whisper-compute-type float16 \
+  --whisper-language es \
+  --whisper-vad-filter
+```
+
+Nota: para detectar la palabra custom `ELECCIA` necesitas un modelo de wakeword entrenado
+(`.onnx`/`.tflite`) y pasarlo en `--openwakeword-model-paths`.
+
+Instalacion de wakeword:
+
+```bash
+pip install openwakeword
+```
 
 La consistencia temporal se puede ajustar con `TEMPORAL_CONSISTENCY_ENABLED` y `TEMPORAL_MIN_CONSISTENT_FRAMES`.
 Para captura de datos guiada con quality gate y angulos, usa `--guided-enroll` en `scripts/run_camera_demo.py`.

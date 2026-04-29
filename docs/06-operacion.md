@@ -25,8 +25,72 @@ uvicorn eleccia_core.api.main:app
 
 Opcional:
 
-- `ELECCIA_IDENTIFICATION_CMD`: comando completo para reemplazar el launcher default.
 - `ELECCIA_IDENTIFICATION_ARGS`: argumentos extra para `scripts/run_camera_demo.py`.
+
+## Arranque Core (sin API)
+
+Para ejecutar Eleccia Core como runtime local y que levante modulos automaticamente:
+
+```bash
+python3 scripts/run_eleccia_core.py
+```
+
+Config relevante en `.env`:
+
+- `ELECCIA_CORE_MODULES=vision,voice,listen`
+- `ELECCIA_IDENTIFICATION_ARGS` para modulo `vision`
+- `ELECCIA_LISTEN_ENABLED=true` habilita listener de comandos
+- `ELECCIA_LISTEN_BACKEND=stdin|whisper|openwakeword_whisper`
+- `ELECCIA_LISTEN_WAKE_WORD=eleccia`
+- `ELECCIA_LISTEN_WAKE_WORD_ALIASES=elexia,eleksia,elecia`
+- `ELECCIA_LISTEN_WAKE_WORD_FUZZY_THRESHOLD=0.80`
+- `ELECCIA_LISTEN_REQUIRE_WAKE_WORD=true`
+- `ELECCIA_LISTEN_WAKE_COMMAND_WINDOW_SECONDS=6.0`
+- Whisper config: `ELECCIA_LISTEN_WHISPER_*` (ver `.env.example`)
+- openWakeWord config: `ELECCIA_LISTEN_OPENWAKEWORD_*` (ver `.env.example`)
+- Mutex global de audio: `ELECCIA_AUDIO_LOCK_FILE`, `ELECCIA_AUDIO_LOCK_STRICT`, `ELECCIA_AUDIO_LOCK_TIMEOUT_SECONDS`
+
+## STT recomendado (Whisper)
+
+Para capturar comandos por voz, la opcion recomendada es `faster-whisper`.
+
+Instalacion:
+
+```bash
+pip install faster-whisper
+```
+
+Nota:
+
+- `faster-whisper` ya fue agregado al proyecto en `pyproject.toml` y `requirements.txt`.
+- En la siguiente fase se habilita backend `whisper` en `eleccia_listen` (hoy el backend activo es `stdin`).
+
+Preset sugerido para tu GPU 48GB:
+
+- modelo `large-v3`
+- `compute_type=float16`
+- `language=es`
+- `vad_filter=true`
+
+Prueba standalone (solo STT):
+
+```bash
+python3 scripts/test_stt_whisper.py --backend whisper --whisper-model large-v3 --whisper-device cuda --whisper-compute-type float16 --whisper-language es --whisper-vad-filter
+```
+
+Prueba standalone (wakeword + STT):
+
+```bash
+python3 scripts/test_stt_whisper.py \
+  --backend openwakeword_whisper \
+  --openwakeword-model-paths /abs/path/eleccia.onnx \
+  --openwakeword-threshold 0.5 \
+  --whisper-model large-v3 \
+  --whisper-device cuda \
+  --whisper-compute-type float16 \
+  --whisper-language es \
+  --whisper-vad-filter
+```
 
 ## Config fija para demo (.env)
 
