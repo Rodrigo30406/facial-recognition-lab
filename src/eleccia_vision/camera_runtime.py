@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run a local webcam demo for facial recognition.
+"""Run the local webcam runtime for facial recognition.
 
 Usage:
-  python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01
+  python3 scripts/run_vision_runtime.py --camera-index 0 --camera-id cam-01
 
 Controls:
   q: quit
@@ -168,6 +168,7 @@ class LatestFrameGrabber:
         self._latest_frame: np.ndarray | None = None
         self._latest_frame_id = 0
         self._latest_error_ts = 0.0
+        self._consecutive_failures = 0
 
     def start(self) -> None:
         cap = cv2.VideoCapture(self._camera_index)
@@ -202,26 +203,54 @@ class LatestFrameGrabber:
             return self._latest_frame_id, self._latest_frame.copy()
 
     def _run(self) -> None:
-        cap = self._cap
-        if cap is None:
-            return
         while not self._stop_event.is_set():
+            cap = self._cap
+            if cap is None:
+                time.sleep(0.05)
+                continue
             ok, frame = cap.read()
             if not ok:
+                self._consecutive_failures += 1
                 now = time.time()
                 if (now - self._latest_error_ts) > 2.0:
                     self._latest_error_ts = now
                     print("[camera] frame read failed; retrying...")
+                if self._consecutive_failures >= 50:
+                    self._try_reopen_capture()
+                    self._consecutive_failures = 0
                 time.sleep(0.02)
                 continue
 
+            self._consecutive_failures = 0
             with self._lock:
                 self._latest_frame = frame
                 self._latest_frame_id += 1
 
+    def _try_reopen_capture(self) -> None:
+        old = self._cap
+        self._cap = None
+        if old is not None:
+            try:
+                old.release()
+            except Exception:
+                pass
+        try:
+            cap = cv2.VideoCapture(self._camera_index)
+            if not cap.isOpened():
+                print(f"[camera] reopen failed for index {self._camera_index}")
+                return
+            try:
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            except Exception:
+                pass
+            self._cap = cap
+            print(f"[camera] reopened camera index {self._camera_index}")
+        except Exception as exc:
+            print(f"[camera] reopen exception: {exc}")
+
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Webcam demo for facial recognition")
+    parser = argparse.ArgumentParser(description="Webcam runtime for facial recognition")
     parser.add_argument("--camera-index", type=int, default=0, help="OpenCV camera index")
     parser.add_argument("--camera-id", type=str, default="cam-01", help="Camera identifier")
     parser.add_argument(
@@ -233,7 +262,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--window-name",
         type=str,
-        default="Facial Recognition Demo",
+        default="Facial Recognition Runtime",
         help="Display window title",
     )
     parser.add_argument(
@@ -381,12 +410,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parsed_argv = list(sys.argv[1:] if argv is None else argv)
     args = parser.parse_args(parsed_argv)
-    _apply_demo_env_defaults(args, parsed_argv)
+    _apply_runtime_env_defaults(args, parsed_argv)
     _apply_guided_preset(args)
     return args
 
 
-def _apply_demo_env_defaults(args: argparse.Namespace, argv: list[str]) -> None:
+def _apply_runtime_env_defaults(args: argparse.Namespace, argv: list[str]) -> None:
     file_values = _read_env_file()
 
     _apply_env_value(
@@ -510,7 +539,7 @@ def _apply_demo_env_defaults(args: argparse.Namespace, argv: list[str]) -> None:
     _apply_env_value(
         args=args,
         attr="voice_greet",
-        env_key="ELECCIA_VOICE_ENABLED",
+        env_key="ELECCIA_VISION_VOICE_GREET",
         parser=_to_bool,
         argv=argv,
         flag="--voice-greet",
@@ -771,7 +800,7 @@ def _pick_arg(current, fallback):
     return current
 
 
-def run_demo(args: argparse.Namespace, stop_event: threading.Event | None = None) -> None:
+def run_camera_runtime(args: argparse.Namespace, stop_event: threading.Event | None = None) -> None:
     services = build_services()
     guided_state = _build_guided_enroll_state(args)
     gate_thresholds = _build_gate_thresholds(args)
@@ -783,7 +812,7 @@ def run_demo(args: argparse.Namespace, stop_event: threading.Event | None = None
     except Exception as exc:
         raise SystemExit(str(exc))
 
-    print("Camera demo started")
+    print("Camera runtime started")
     print("- Press 'q' to quit")
     if args.enroll_person_id:
         print(f"- Press 'e' to enroll current frame as '{args.enroll_person_id}'")
@@ -816,15 +845,6 @@ def run_demo(args: argparse.Namespace, stop_event: threading.Event | None = None
         while True:
             if stop_event is not None and stop_event.is_set():
                 break
-            now_ts = time.perf_counter()
-            dt = now_ts - prev_frame_ts
-            prev_frame_ts = now_ts
-            if dt > 1e-6:
-                instant_fps = 1.0 / dt
-                if state.fps is None:
-                    state.fps = instant_fps
-                else:
-                    state.fps = (state.fps * 0.85) + (instant_fps * 0.15)
 
             latest = frame_grabber.get_latest()
             if latest is None:
@@ -848,6 +868,15 @@ def run_demo(args: argparse.Namespace, stop_event: threading.Event | None = None
                 time.sleep(0.002)
                 continue
             last_frame_id = frame_id
+            now_ts = time.perf_counter()
+            dt = now_ts - prev_frame_ts
+            prev_frame_ts = now_ts
+            if dt > 1e-6:
+                instant_fps = 1.0 / dt
+                if state.fps is None:
+                    state.fps = instant_fps
+                else:
+                    state.fps = (state.fps * 0.85) + (instant_fps * 0.15)
 
             frame_idx += 1
             show_landmarks_now = bool(args.show_landmarks) and (frame_idx % landmarks_every == 0)
@@ -888,7 +917,7 @@ def run_demo(args: argparse.Namespace, stop_event: threading.Event | None = None
 
 def main(argv: list[str] | None = None, stop_event: threading.Event | None = None) -> None:
     args = parse_args(argv)
-    run_demo(args=args, stop_event=stop_event)
+    run_camera_runtime(args=args, stop_event=stop_event)
 
 
 def _run_recognition(

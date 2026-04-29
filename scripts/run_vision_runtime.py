@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Run camera demo from the Eleccia Vision module.
+"""Run vision runtime from the Eleccia Vision module.
 
 Usage:
-  python3 scripts/run_camera_demo.py --camera-index 0 --camera-id cam-01
+  python3 scripts/run_vision_runtime.py --camera-index 0 --camera-id cam-01
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ SRC_PATH = REPO_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from eleccia_vision.camera_demo import main
+from eleccia_vision.camera_runtime import main
 
 
 if __name__ == "__main__":
