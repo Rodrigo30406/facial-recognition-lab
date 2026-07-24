@@ -18,6 +18,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import cv2
 import numpy as np
@@ -28,7 +29,6 @@ from eleccia_vision.application.quality_gate import (
     FaceObservation,
     QualityGateThresholds,
     build_angle_plan,
-    bucket_instruction,
     evaluate_quality_gate,
 )
 from eleccia_core.bootstrap import build_services
@@ -44,6 +44,7 @@ class DisplayState:
     fps: float | None = None
     message: str = ""
     message_until_ts: float = 0.0
+    enroll_enabled: bool = False
     landmarks: list[tuple[int, int]] = field(default_factory=list)
     landmarks_warning_shown: bool = False
     gate_status: str | None = None
@@ -52,6 +53,7 @@ class DisplayState:
     gate_pose: str = ""
     gate_current_bucket: AngleBucket | None = None
     gate_target_bucket: AngleBucket | None = None
+    gate_buckets: dict[str, tuple[int, int]] = field(default_factory=dict)
     face_overlays: list["FaceOverlay"] = field(default_factory=list)
     unknown_label_by_track: dict[str, int] = field(default_factory=dict)
     unknown_last_seen_ts_by_track: dict[str, float] = field(default_factory=dict)
@@ -110,9 +112,15 @@ DEFAULT_GUIDED_PRESET = GuidedPreset(
     cooldown_ms=900,
     landmarks_max_points=20,
     landmarks_every=2,
-    min_det_score=0.60,
-    min_face_ratio=0.08,
-    min_sharpness=90.0,
+    # Turning the head to cover left/right/up/down poses shrinks the face box and
+    # lowers detection confidence. These defaults leave enough headroom so a
+    # turned face still clears the quality gate; otherwise the proximity/detection
+    # checks reject the very pose the guide is asking for ("acercate/mira a camara"
+    # while it wants you to turn away). Tighten via the "strict" preset or the
+    # ELECCIA_GUIDED_* env vars when capture quality matters more than ease.
+    min_det_score=0.45,
+    min_face_ratio=0.045,
+    min_sharpness=55.0,
     min_brightness=50.0,
     max_brightness=210.0,
     max_abs_yaw=55.0,
@@ -155,12 +163,82 @@ GUIDED_PRESETS: dict[str, GuidedPreset] = {
 
 TRACKING_MIN_FACE_RATIO = 0.0035
 
+_IP_SOURCE_ALIASES = {"ip", "network", "rtsp"}
+
+
+def _inject_credentials(url: str, user: str, password: str) -> str:
+    """Insert user:password into a URL that doesn't already carry credentials."""
+    if not user:
+        return url
+    try:
+        parts = urlsplit(url)
+        if parts.username or parts.password:
+            return url
+        host = parts.hostname or ""
+        portpart = f":{parts.port}" if parts.port else ""
+        auth = f"{quote(user, safe='')}:{quote(password, safe='')}@" if password else f"{quote(user, safe='')}@"
+        return urlunsplit((parts.scheme, f"{auth}{host}{portpart}", parts.path, parts.query, parts.fragment))
+    except Exception:
+        return url
+
+
+def _build_camera_source(args: argparse.Namespace) -> int | str:
+    """Return an int local index or a URL string for the IP camera."""
+    source = str(getattr(args, "camera_source", "local") or "local").strip().lower()
+    if source not in _IP_SOURCE_ALIASES:
+        return int(args.camera_index)
+
+    user = (getattr(args, "camera_user", None) or "").strip()
+    password = getattr(args, "camera_password", None) or ""
+
+    url = (getattr(args, "camera_url", None) or "").strip()
+    if url:
+        return _inject_credentials(url, user, password)
+
+    host = (getattr(args, "camera_ip", None) or "").strip()
+    if not host:
+        raise SystemExit(
+            "Camera source 'ip' requires ELECCIA_CAMERA_IP (host/IP) or ELECCIA_CAMERA_URL"
+        )
+    scheme = (getattr(args, "camera_scheme", None) or "rtsp").strip() or "rtsp"
+    port = int(getattr(args, "camera_port", 0) or 0)
+    path = (getattr(args, "camera_rtsp_path", None) or "").strip()
+    if path and not path.startswith("/"):
+        path = "/" + path
+
+    auth = ""
+    if user:
+        auth = f"{quote(user, safe='')}:{quote(password, safe='')}@" if password else f"{quote(user, safe='')}@"
+    portpart = f":{port}" if port else ""
+    return f"{scheme}://{auth}{host}{portpart}{path}"
+
+
+def _mask_source(source: int | str) -> str:
+    """Human-readable source label with credentials hidden."""
+    if not isinstance(source, str):
+        return f"index {source}"
+    try:
+        parts = urlsplit(source)
+        if parts.username or parts.password:
+            netloc = parts.hostname or ""
+            if parts.port:
+                netloc += f":{parts.port}"
+            masked = f"{parts.username}:***@{netloc}" if parts.username else f"***@{netloc}"
+            return urlunsplit((parts.scheme, masked, parts.path, parts.query, ""))
+    except Exception:
+        pass
+    return source
+
 
 class LatestFrameGrabber:
     """Continuously captures frames and keeps only the newest one."""
 
-    def __init__(self, camera_index: int) -> None:
-        self._camera_index = int(camera_index)
+    def __init__(self, source: int | str, width: int = 0, height: int = 0, fps: int = 0) -> None:
+        self._source: int | str = source if isinstance(source, str) else int(source)
+        self._is_network = isinstance(self._source, str)
+        self._width = int(width or 0)
+        self._height = int(height or 0)
+        self._fps = int(fps or 0)
         self._cap: cv2.VideoCapture | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -170,16 +248,50 @@ class LatestFrameGrabber:
         self._latest_error_ts = 0.0
         self._consecutive_failures = 0
 
-    def start(self) -> None:
-        cap = cv2.VideoCapture(self._camera_index)
-        if not cap.isOpened():
-            raise RuntimeError(f"Could not open camera index {self._camera_index}")
+    @property
+    def source_label(self) -> str:
+        return _mask_source(self._source)
 
-        # Best effort: many backends ignore this, but it helps when supported.
+    def _open_capture(self) -> cv2.VideoCapture:
+        if self._is_network:
+            # FFMPEG backend handles RTSP/HTTP streams.
+            return cv2.VideoCapture(self._source, cv2.CAP_FFMPEG)
+        return cv2.VideoCapture(self._source)
+
+    def _configure(self, cap: cv2.VideoCapture) -> None:
+        # Keep the buffer small so we always process the freshest frame.
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
+        if self._is_network:
+            # Resolution/FPS/FOURCC come from the IP camera's own config; the
+            # capture props below only apply to local USB devices.
+            return
+        # MJPG lets most USB webcams stream 720p+ at full frame rate; without it
+        # they fall back to raw YUY2 and throttle to ~10 FPS over USB2 bandwidth.
+        try:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        except Exception:
+            pass
+        if self._width and self._height:
+            try:
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, float(self._width))
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, float(self._height))
+            except Exception:
+                pass
+        if self._fps:
+            try:
+                cap.set(cv2.CAP_PROP_FPS, float(self._fps))
+            except Exception:
+                pass
+
+    def start(self) -> None:
+        cap = self._open_capture()
+        if not cap.isOpened():
+            raise RuntimeError(f"Could not open camera source {self.source_label}")
+
+        self._configure(cap)
 
         self._cap = cap
         self._stop_event.clear()
@@ -235,16 +347,13 @@ class LatestFrameGrabber:
             except Exception:
                 pass
         try:
-            cap = cv2.VideoCapture(self._camera_index)
+            cap = self._open_capture()
             if not cap.isOpened():
-                print(f"[camera] reopen failed for index {self._camera_index}")
+                print(f"[camera] reopen failed for source {self.source_label}")
                 return
-            try:
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            except Exception:
-                pass
+            self._configure(cap)
             self._cap = cap
-            print(f"[camera] reopened camera index {self._camera_index}")
+            print(f"[camera] reopened camera source {self.source_label}")
         except Exception as exc:
             print(f"[camera] reopen exception: {exc}")
 
@@ -253,6 +362,47 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Webcam runtime for facial recognition")
     parser.add_argument("--camera-index", type=int, default=0, help="OpenCV camera index")
     parser.add_argument("--camera-id", type=str, default="cam-01", help="Camera identifier")
+    parser.add_argument(
+        "--capture-width",
+        type=int,
+        default=1280,
+        help="Requested camera capture width in pixels (0 = camera default)",
+    )
+    parser.add_argument(
+        "--capture-height",
+        type=int,
+        default=720,
+        help="Requested camera capture height in pixels (0 = camera default)",
+    )
+    parser.add_argument(
+        "--capture-fps",
+        type=int,
+        default=30,
+        help="Requested camera frame rate (0 = camera default)",
+    )
+    parser.add_argument(
+        "--camera-source",
+        choices=("local", "ip"),
+        default="local",
+        help="Camera source: 'local' USB index or 'ip' network camera (RTSP/HTTP)",
+    )
+    parser.add_argument("--camera-ip", type=str, default=None, help="IP camera host/IP (source=ip)")
+    parser.add_argument("--camera-user", type=str, default=None, help="IP camera username")
+    parser.add_argument("--camera-password", type=str, default=None, help="IP camera password")
+    parser.add_argument("--camera-port", type=int, default=554, help="IP camera port (default 554 for RTSP)")
+    parser.add_argument(
+        "--camera-rtsp-path",
+        type=str,
+        default="",
+        help="RTSP stream path, e.g. /Streaming/Channels/101 (Hikvision) or /cam/realmonitor?channel=1&subtype=0 (Dahua)",
+    )
+    parser.add_argument("--camera-scheme", type=str, default="rtsp", help="IP camera URL scheme (rtsp/http)")
+    parser.add_argument(
+        "--camera-url",
+        type=str,
+        default=None,
+        help="Full IP camera URL (overrides ip/port/path; credentials injected if missing)",
+    )
     parser.add_argument(
         "--recognize-every",
         type=int,
@@ -339,7 +489,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--voice-template",
         type=str,
-        default="Hola {name}, {welcome} al laboratorio de IA",
+        default="Hola {name}, {welcome} al laboratorio de IA, Eleccia",
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -358,6 +508,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--voice-min-face-ratio",
         type=float,
         default=0.0,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--voice-greet-unknown",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=argparse.SUPPRESS,
     )
     parser.add_argument(
@@ -434,6 +590,105 @@ def _apply_runtime_env_defaults(args: argparse.Namespace, argv: list[str]) -> No
         parser=_to_str,
         argv=argv,
         flag="--camera-id",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="capture_width",
+        env_key="ELECCIA_CAMERA_WIDTH",
+        parser=_to_int,
+        argv=argv,
+        flag="--capture-width",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="capture_height",
+        env_key="ELECCIA_CAMERA_HEIGHT",
+        parser=_to_int,
+        argv=argv,
+        flag="--capture-height",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="capture_fps",
+        env_key="ELECCIA_CAMERA_FPS",
+        parser=_to_int,
+        argv=argv,
+        flag="--capture-fps",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="camera_source",
+        env_key="ELECCIA_CAMERA_SOURCE",
+        parser=_to_str,
+        argv=argv,
+        flag="--camera-source",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="camera_ip",
+        env_key="ELECCIA_CAMERA_IP",
+        parser=_to_optional_str,
+        argv=argv,
+        flag="--camera-ip",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="camera_user",
+        env_key="ELECCIA_CAMERA_USER",
+        parser=_to_optional_str,
+        argv=argv,
+        flag="--camera-user",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="camera_password",
+        env_key="ELECCIA_CAMERA_PASSWORD",
+        parser=_to_optional_str,
+        argv=argv,
+        flag="--camera-password",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="camera_port",
+        env_key="ELECCIA_CAMERA_PORT",
+        parser=_to_int,
+        argv=argv,
+        flag="--camera-port",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="camera_rtsp_path",
+        env_key="ELECCIA_CAMERA_RTSP_PATH",
+        parser=_to_str,
+        argv=argv,
+        flag="--camera-rtsp-path",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="camera_scheme",
+        env_key="ELECCIA_CAMERA_SCHEME",
+        parser=_to_str,
+        argv=argv,
+        flag="--camera-scheme",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
+        attr="camera_url",
+        env_key="ELECCIA_CAMERA_URL",
+        parser=_to_optional_str,
+        argv=argv,
+        flag="--camera-url",
         file_values=file_values,
     )
     _apply_env_value(
@@ -592,6 +847,15 @@ def _apply_runtime_env_defaults(args: argparse.Namespace, argv: list[str]) -> No
     )
     _apply_env_value(
         args=args,
+        attr="voice_greet_unknown",
+        env_key="ELECCIA_VOICE_GREET_UNKNOWN",
+        parser=_to_bool,
+        argv=argv,
+        flag="--voice-greet-unknown",
+        file_values=file_values,
+    )
+    _apply_env_value(
+        args=args,
         attr="voice_rate",
         env_key="ELECCIA_VOICE_RATE",
         parser=_to_int,
@@ -684,8 +948,11 @@ def _apply_env_value(
 
 
 def _flag_present(argv: list[str], flag: str) -> bool:
+    negative_flag = f"--no-{flag[2:]}" if flag.startswith("--") else ""
     for token in argv:
         if token == flag or token.startswith(f"{flag}="):
+            return True
+        if negative_flag and (token == negative_flag or token.startswith(f"{negative_flag}=")):
             return True
     return False
 
@@ -801,18 +1068,33 @@ def _pick_arg(current, fallback):
 
 
 def run_camera_runtime(args: argparse.Namespace, stop_event: threading.Event | None = None) -> None:
+    if args.enroll_person_id:
+        # Enrollment is data capture, not identification; greetings only belong
+        # to detection mode even if ELECCIA_VISION_VOICE_GREET=true globally.
+        args.voice_greet = False
+
     services = build_services()
     guided_state = _build_guided_enroll_state(args)
     gate_thresholds = _build_gate_thresholds(args)
     voice_assistant = VoiceAssistant(build_voice_settings_from_args(args))
 
-    frame_grabber = LatestFrameGrabber(args.camera_index)
+    camera_source = _build_camera_source(args)
+    if isinstance(camera_source, str):
+        # Prefer TCP for RTSP: fewer artifacts/drops than the default UDP.
+        os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+    frame_grabber = LatestFrameGrabber(
+        camera_source,
+        width=int(getattr(args, "capture_width", 0) or 0),
+        height=int(getattr(args, "capture_height", 0) or 0),
+        fps=int(getattr(args, "capture_fps", 0) or 0),
+    )
     try:
         frame_grabber.start()
     except Exception as exc:
         raise SystemExit(str(exc))
 
     print("Camera runtime started")
+    print(f"- Camera source: {frame_grabber.source_label}")
     print("- Press 'q' to quit")
     if args.enroll_person_id:
         print(f"- Press 'e' to enroll current frame as '{args.enroll_person_id}'")
@@ -835,7 +1117,18 @@ def run_camera_runtime(args: argparse.Namespace, stop_event: threading.Event | N
             if voice_assistant.backend_error:
                 print(f"- Voice backend detail: {voice_assistant.backend_error}")
 
+    # WINDOW_NORMAL makes the window user-resizable (the default AUTOSIZE locks it
+    # to the frame size); KEEPRATIO avoids stretching the video when resized.
+    cv2.namedWindow(args.window_name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    init_w = int(getattr(args, "capture_width", 0) or 1280)
+    init_h = int(getattr(args, "capture_height", 0) or 720)
+    if init_w > 1280:  # keep the initial window reasonable on smaller screens
+        init_h = int(init_h * (1280 / init_w))
+        init_w = 1280
+    cv2.resizeWindow(args.window_name, init_w, init_h)
+
     state = DisplayState()
+    state.enroll_enabled = bool(args.enroll_person_id)
     frame_idx = 0
     last_frame_id = 0
     landmarks_every = max(1, int(args.landmarks_every or 1))
@@ -1588,6 +1881,13 @@ def _guided_enroll_step(
         f"yaw={_fmt_num(assessment.yaw)} pitch={_fmt_num(assessment.pitch)} roll={_fmt_num(assessment.roll)}"
     )
     display_state.gate_progress = _gate_progress(guided_state)
+    display_state.gate_buckets = {
+        bucket: (
+            guided_state.captured_by_bucket.get(bucket, 0),
+            guided_state.plan_by_bucket.get(bucket, 0),
+        )
+        for bucket in ("center", "left", "right", "up", "down")
+    }
 
     if guided_state.completed:
         display_state.gate_status = "green"
@@ -1680,58 +1980,425 @@ def _fmt_num(value: float | None) -> str:
     return f"{value:.1f}"
 
 
+# ---------------------------------------------------------------------------
+# HUD renderer
+#
+# Overlays are drawn straight onto the BGR camera frame. OpenCV's Hershey fonts
+# are ASCII-only, so avoid accented literals here (they render as boxes);
+# Spanish text produced by other modules is passed through as-is.
+# ---------------------------------------------------------------------------
+
+# Institutional JNE palette (BGR). Accent is the JNE guinda (deep crimson,
+# ~#B01E3C); the surfaces are a warm charcoal with a faint guinda tint. Status
+# colors stay semantic (green/amber/red) so they read regardless of branding.
+_HEADER_H = 46
+_C_INK = (242, 240, 242)
+_C_MUTED = (168, 162, 170)
+_C_PANEL = (30, 24, 36)
+_C_HEADER = (20, 14, 26)
+_C_ACCENT = (60, 30, 176)      # JNE guinda #B01E3C
+_C_ACCENT_SOFT = (110, 92, 216)
+_C_GREEN = (96, 210, 122)
+_C_AMBER = (60, 190, 250)
+_C_RED = (84, 84, 240)
+_C_TRACK = (58, 52, 62)
+
+_GATE_COLORS = {"red": _C_RED, "yellow": _C_AMBER, "green": _C_GREEN}
+
+# Lazy, path-keyed cache for the optional header logo so it is decoded once
+# instead of every frame.
+_LOGO_CACHE: dict[str, object] = {"path": None, "loaded": False, "bgr": None, "alpha": None}
+
+
+def _get_logo(height: int):
+    path = os.getenv("ELECCIA_LOGO_PATH", "asset/logo.png")
+    if _LOGO_CACHE["loaded"] and _LOGO_CACHE["path"] == path:
+        return _LOGO_CACHE["bgr"], _LOGO_CACHE["alpha"]
+
+    _LOGO_CACHE["loaded"] = True
+    _LOGO_CACHE["path"] = path
+    _LOGO_CACHE["bgr"] = None
+    _LOGO_CACHE["alpha"] = None
+
+    try:
+        raw = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    except Exception:
+        raw = None
+    if raw is None or raw.ndim < 2:
+        return None, None
+
+    h0, w0 = raw.shape[:2]
+    if h0 <= 0 or w0 <= 0:
+        return None, None
+    target_w = max(1, int(round(w0 * (height / float(h0)))))
+    resized = cv2.resize(raw, (target_w, height), interpolation=cv2.INTER_AREA)
+
+    if resized.ndim == 3 and resized.shape[2] == 4:
+        bgr = resized[:, :, :3].copy()
+        alpha = resized[:, :, 3].astype(np.float32) / 255.0
+    else:
+        bgr = resized[:, :, :3].copy() if resized.ndim == 3 else cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR)
+        alpha = np.ones((height, target_w), np.float32)
+
+    _LOGO_CACHE["bgr"] = bgr
+    _LOGO_CACHE["alpha"] = alpha
+    return bgr, alpha
+
+
+def _blit_logo(frame, bgr, alpha, x, y) -> None:
+    fh, fw = frame.shape[:2]
+    lh, lw = bgr.shape[:2]
+    x, y = int(x), int(y)
+    w = min(lw, fw - x)
+    h = min(lh, fh - y)
+    if w <= 0 or h <= 0:
+        return
+    roi = frame[y:y + h, x:x + w].astype(np.float32)
+    a = alpha[:h, :w, None]
+    blended = bgr[:h, :w].astype(np.float32) * a + roi * (1.0 - a)
+    frame[y:y + h, x:x + w] = blended.astype(np.uint8)
+
+
+def _fill_rounded(img, x1, y1, x2, y2, color, radius) -> None:
+    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+    r = int(min(radius, (x2 - x1) // 2, (y2 - y1) // 2))
+    if r < 1:
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, -1, lineType=cv2.LINE_AA)
+        return
+    cv2.rectangle(img, (x1 + r, y1), (x2 - r, y2), color, -1)
+    cv2.rectangle(img, (x1, y1 + r), (x2, y2 - r), color, -1)
+    cv2.circle(img, (x1 + r, y1 + r), r, color, -1, lineType=cv2.LINE_AA)
+    cv2.circle(img, (x2 - r, y1 + r), r, color, -1, lineType=cv2.LINE_AA)
+    cv2.circle(img, (x1 + r, y2 - r), r, color, -1, lineType=cv2.LINE_AA)
+    cv2.circle(img, (x2 - r, y2 - r), r, color, -1, lineType=cv2.LINE_AA)
+
+
+def _panel(frame, x1, y1, x2, y2, color=_C_PANEL, alpha=0.62, radius=14) -> None:
+    h, w = frame.shape[:2]
+    x1 = max(0, int(x1)); y1 = max(0, int(y1))
+    x2 = min(w, int(x2)); y2 = min(h, int(y2))
+    if x2 <= x1 or y2 <= y1:
+        return
+    roi = frame[y1:y2, x1:x2]
+    overlay = roi.copy()
+    _fill_rounded(overlay, 0, 0, x2 - x1 - 1, y2 - y1 - 1, color, radius)
+    cv2.addWeighted(overlay, alpha, roi, 1.0 - alpha, 0.0, roi)
+
+
+def _tsize(text, scale, thickness, font=cv2.FONT_HERSHEY_SIMPLEX):
+    (tw, th), _ = cv2.getTextSize(text, font, scale, thickness)
+    return tw, th
+
+
+def _text(frame, text, org, scale=0.5, color=_C_INK, thickness=1,
+          font=cv2.FONT_HERSHEY_SIMPLEX, shadow=True) -> None:
+    if shadow:
+        cv2.putText(frame, text, (org[0] + 1, org[1] + 1), font, scale,
+                    (0, 0, 0), thickness + 1, lineType=cv2.LINE_AA)
+    cv2.putText(frame, text, org, font, scale, color, thickness, lineType=cv2.LINE_AA)
+
+
+def _corner_brackets(frame, bbox, color, thickness=2, length_frac=0.24) -> None:
+    x1, y1, x2, y2 = bbox
+    span = min(x2 - x1, y2 - y1)
+    length = int(max(10, span * length_frac))
+    for cx, cy, sx, sy in ((x1, y1, 1, 1), (x2, y1, -1, 1), (x1, y2, 1, -1), (x2, y2, -1, -1)):
+        cv2.line(frame, (cx, cy), (cx + sx * length, cy), color, thickness, lineType=cv2.LINE_AA)
+        cv2.line(frame, (cx, cy), (cx, cy + sy * length), color, thickness, lineType=cv2.LINE_AA)
+
+
+def _face_color(overlay: "FaceOverlay") -> tuple[int, int, int]:
+    label = overlay.label or ""
+    if label.startswith("Ambiguo"):
+        return _C_AMBER
+    if label.startswith("Desconocido"):
+        return _C_RED
+    if overlay.in_range and not overlay.regreet_armed:
+        return _C_GREEN
+    return _C_AMBER
+
+
+def _label_chip(frame, anchor_x, anchor_y, text, dot_color) -> None:
+    scale, thickness = 0.5, 1
+    tw, th = _tsize(text, scale, thickness, cv2.FONT_HERSHEY_DUPLEX)
+    pad, dot, gap = 10, 4, 8
+    cw = pad + dot * 2 + gap + tw + pad
+    ch = th + 14
+    w = frame.shape[1]
+    x1 = int(max(4, min(anchor_x, w - cw - 4)))
+    y1 = int(anchor_y - ch)
+    if y1 < _HEADER_H + 4:
+        y1 = _HEADER_H + 4
+    y2 = y1 + ch
+    x2 = x1 + cw
+    _panel(frame, x1, y1, x2, y2, color=(18, 16, 14), alpha=0.82, radius=ch // 2)
+    cy = (y1 + y2) // 2
+    cv2.circle(frame, (x1 + pad + dot, cy), dot, dot_color, -1, lineType=cv2.LINE_AA)
+    _text(frame, text, (x1 + pad + dot * 2 + gap, cy + th // 2), scale, _C_INK,
+          thickness, cv2.FONT_HERSHEY_DUPLEX, shadow=False)
+
+
+def _chip_right(frame, right_x, cy, text, accent) -> int:
+    scale, thickness = 0.5, 1
+    tw, th = _tsize(text, scale, thickness)
+    pad, dot, gap = 9, 4, 7
+    cw = pad + dot * 2 + gap + tw + pad
+    ch = 26
+    x2, x1 = int(right_x), int(right_x) - cw
+    y1, y2 = cy - ch // 2, cy + ch // 2
+    _panel(frame, x1, y1, x2, y2, color=_C_PANEL, alpha=0.7, radius=ch // 2)
+    cv2.circle(frame, (x1 + pad + dot, cy), dot, accent, -1, lineType=cv2.LINE_AA)
+    _text(frame, text, (x1 + pad + dot * 2 + gap, cy + th // 2), scale, _C_INK,
+          thickness, shadow=False)
+    return x1
+
+
+def _draw_viewfinder(frame, color) -> None:
+    h, w = frame.shape[:2]
+    m, length, t = 16, 40, 2
+    for cx, cy, sx, sy in ((m, m, 1, 1), (w - m, m, -1, 1), (m, h - m, 1, -1), (w - m, h - m, -1, -1)):
+        cv2.line(frame, (cx, cy), (cx + sx * length, cy), color, t, lineType=cv2.LINE_AA)
+        cv2.line(frame, (cx, cy), (cx, cy + sy * length), color, t, lineType=cv2.LINE_AA)
+
+
+def _draw_header(frame, state: DisplayState) -> None:
+    w = frame.shape[1]
+    _panel(frame, 0, 0, w, _HEADER_H, color=_C_HEADER, alpha=0.58, radius=0)
+    cv2.line(frame, (0, _HEADER_H), (w, _HEADER_H), _C_ACCENT, 1, lineType=cv2.LINE_AA)
+
+    x = 16
+    logo_bgr, logo_alpha = _get_logo(_HEADER_H - 16)
+    if logo_bgr is not None:
+        _blit_logo(frame, logo_bgr, logo_alpha, x, 8)
+        x += logo_bgr.shape[1] + 12
+    else:
+        cv2.circle(frame, (x + 10, 23), 7, _C_ACCENT, -1, lineType=cv2.LINE_AA)
+        cv2.circle(frame, (x + 10, 23), 7, (255, 255, 255), 1, lineType=cv2.LINE_AA)
+        x += 28
+
+    # Wordmark "EleccIA": the "IA" is drawn in the accent to highlight the AI.
+    _text(frame, "Elecc", (x, 30), 0.72, _C_INK, 1, cv2.FONT_HERSHEY_DUPLEX)
+    ew, _ = _tsize("Elecc", 0.72, 1, cv2.FONT_HERSHEY_DUPLEX)
+    _text(frame, "IA", (x + ew, 30), 0.72, _C_ACCENT_SOFT, 1, cv2.FONT_HERSHEY_DUPLEX)
+    iw, _ = _tsize("IA", 0.72, 1, cv2.FONT_HERSHEY_DUPLEX)
+    brand_end = x + ew + iw
+
+    # Telemetry chips, drawn right-to-left. On narrow windows, stop before they
+    # would collide with the wordmark instead of overlapping the subtitle.
+    cy = 23
+    chips = [("EN LINEA", _C_GREEN)]
+    if state.fps is not None:
+        chips.append((f"{state.fps:.0f} FPS", _C_ACCENT))
+    if state.latency_ms is not None:
+        chips.append((f"{state.latency_ms:.0f} ms", _C_ACCENT))
+    chips.append((f"{len(state.face_overlays)} rostro(s)", _C_ACCENT))
+
+    left_limit = brand_end + 16
+    rx = w - 14
+    chips_left = w
+    for text, accent in chips:
+        tw, _ = _tsize(text, 0.5, 1)
+        chip_w = tw + 33  # pad + dot + gap + text + pad, matches _chip_right
+        if rx - chip_w < left_limit:
+            break
+        rx = _chip_right(frame, rx, cy, text, accent)
+        chips_left = rx
+        rx -= 8
+
+    # Subtitle only when it fits between the wordmark and the chips.
+    subtitle = "Reconocimiento facial"
+    sw, _ = _tsize(subtitle, 0.46, 1)
+    if brand_end + 14 + sw + 12 <= chips_left:
+        _text(frame, subtitle, (brand_end + 14, 30), 0.46, _C_MUTED, 1)
+
+
+def _parse_progress(text: str) -> tuple[int, int, dict[str, int]]:
+    done = total = 0
+    buckets: dict[str, int] = {}
+    try:
+        parts = text.split()
+        if parts and "/" in parts[0]:
+            a, b = parts[0].split("/", 1)
+            done, total = int(a), int(b)
+        for token in parts[1:]:
+            if len(token) >= 2 and token[0] in "CLRUD":
+                buckets[token[0]] = int(token[1:])
+    except (ValueError, IndexError):
+        pass
+    return done, total, buckets
+
+
+# Short, imperative head-pose instructions (ASCII for the Hershey font). The
+# words are what the user should DO, not the internal bucket name.
+_POSE_INSTRUCTION = {
+    "center": "Mira al frente",
+    "left": "Voltea a tu izquierda",
+    "right": "Voltea a tu derecha",
+    "up": "Sube la cabeza",
+    "down": "Baja la cabeza",
+}
+
+# Pose-map dots laid out spatially so their position mirrors the head movement.
+_POSE_MAP = {"center": (0, 0), "left": (-1, 0), "right": (1, 0), "up": (0, -1), "down": (0, 1)}
+
+
+def _fit_scale(text, max_w, start=0.6, min_scale=0.42, thickness=1,
+               font=cv2.FONT_HERSHEY_DUPLEX) -> float:
+    scale = start
+    while scale > min_scale:
+        tw, _ = _tsize(text, scale, thickness, font)
+        if tw <= max_w:
+            return scale
+        scale -= 0.02
+    return min_scale
+
+
+def _enroll_instruction(state: DisplayState) -> str:
+    reason = state.gate_reason or ""
+    if reason.startswith("Objetivo completado"):
+        return "Listo! Rostro registrado"
+    if state.gate_status == "green":
+        return "Perfecto, no te muevas"
+    if state.gate_status == "yellow" and state.gate_target_bucket in _POSE_INSTRUCTION:
+        return _POSE_INSTRUCTION[state.gate_target_bucket]
+    return reason or "Acomodate frente a la camara"
+
+
+def _enroll_counts(state: DisplayState) -> tuple[int, int]:
+    if state.gate_buckets:
+        done = sum(cap for cap, _ in state.gate_buckets.values())
+        total = sum(plan for _, plan in state.gate_buckets.values())
+        if total > 0:
+            return done, total
+    done, total, _ = _parse_progress(state.gate_progress)
+    return done, total
+
+
+def _draw_direction_cue(frame, bucket, color) -> None:
+    """Big arrow on the frame edge pointing where the user should turn."""
+    h, w = frame.shape[:2]
+    xc, yc = w // 2, h // 2
+    arrows = {
+        "left": ((int(w * 0.17), yc), (int(w * 0.09), yc)),
+        "right": ((int(w * 0.83), yc), (int(w * 0.91), yc)),
+        "up": ((xc, int(h * 0.32)), (xc, int(h * 0.22))),
+        "down": ((xc, int(h * 0.72)), (xc, int(h * 0.82))),
+    }
+    if bucket not in arrows:
+        return
+    p1, p2 = arrows[bucket]
+    cv2.arrowedLine(frame, p1, p2, (0, 0, 0), 11, cv2.LINE_AA, 0, 0.45)
+    cv2.arrowedLine(frame, p1, p2, color, 6, cv2.LINE_AA, 0, 0.45)
+
+
+def _draw_pose_map(frame, cx, cy, state: DisplayState, accent) -> None:
+    spacing, radius = 20, 7
+    pending = (98, 92, 102)
+    # Faint cross so the layout reads as directions.
+    cv2.line(frame, (cx - spacing, cy), (cx + spacing, cy), _C_TRACK, 1, lineType=cv2.LINE_AA)
+    cv2.line(frame, (cx, cy - spacing), (cx, cy + spacing), _C_TRACK, 1, lineType=cv2.LINE_AA)
+    for bucket, (dx, dy) in _POSE_MAP.items():
+        px, py = cx + dx * spacing, cy + dy * spacing
+        cap, plan = state.gate_buckets.get(bucket, (0, 0))
+        done = plan > 0 and cap >= plan
+        is_target = bucket == state.gate_target_bucket
+        if is_target and not done:
+            cv2.circle(frame, (px, py), radius + 3, accent, 2, lineType=cv2.LINE_AA)
+        color = _C_GREEN if done else (accent if is_target else pending)
+        cv2.circle(frame, (px, py), radius, color, -1, lineType=cv2.LINE_AA)
+
+
+def _draw_enroll_panel(frame, state: DisplayState) -> None:
+    if state.gate_status is None:
+        return
+
+    h, w = frame.shape[:2]
+    accent = _GATE_COLORS.get(state.gate_status, _C_MUTED)
+    pw, ph = 430, 132
+    x1, y2 = 16, h - 16
+    x2, y1 = x1 + pw, y2 - ph
+    _panel(frame, x1, y1, x2, y2, alpha=0.62, radius=16)
+    _fill_rounded(frame, x1 + 10, y1 + 14, x1 + 14, y2 - 14, accent, 2)
+
+    tx = x1 + 26
+    col_right = x2 - 96  # reserve the right block for the pose map
+
+    _text(frame, "ENROLAMIENTO GUIADO", (tx, y1 + 24), 0.44, _C_MUTED, 1,
+          cv2.FONT_HERSHEY_DUPLEX, shadow=False)
+
+    done, total = _enroll_counts(state)
+    count = f"Captura {done}/{total}" if total else "Captura 0/0"
+    cw, _ = _tsize(count, 0.44, 1)
+    _text(frame, count, (col_right - cw, y1 + 24), 0.44, _C_INK, 1)
+
+    # Big, plain-language instruction — the one thing the user must read.
+    cv2.circle(frame, (tx + 6, y1 + 52), 6, accent, -1, lineType=cv2.LINE_AA)
+    instr = _enroll_instruction(state)
+    instr_scale = _fit_scale(instr, max_w=col_right - (tx + 20), start=0.6, min_scale=0.44)
+    _text(frame, instr, (tx + 20, y1 + 58), instr_scale, _C_INK, 1, cv2.FONT_HERSHEY_DUPLEX)
+
+    bar_x1, bar_x2, bar_y, bar_h = tx, col_right, y1 + 74, 8
+    _fill_rounded(frame, bar_x1, bar_y, bar_x2, bar_y + bar_h, _C_TRACK, bar_h // 2)
+    if total > 0:
+        frac = max(0.0, min(1.0, done / total))
+        fill_x = bar_x1 + int((bar_x2 - bar_x1) * frac)
+        if fill_x > bar_x1 + bar_h:
+            _fill_rounded(frame, bar_x1, bar_y, fill_x, bar_y + bar_h, _C_GREEN, bar_h // 2)
+
+    completed = (state.gate_reason or "").startswith("Objetivo completado")
+    hint = "Puedes cerrar con Q" if completed else "La captura es automatica"
+    _text(frame, hint, (tx, y1 + 104), 0.4, _C_MUTED, 1, shadow=False)
+
+    _draw_pose_map(frame, cx=x2 - 50, cy=y1 + 62, state=state, accent=accent)
+
+
+def _draw_toast(frame, state: DisplayState) -> None:
+    if not (state.message and time.time() <= state.message_until_ts):
+        return
+    h, w = frame.shape[:2]
+    msg = state.message
+    accent = _C_GREEN if msg.startswith("Saludo:") else _C_ACCENT
+    scale, thickness = 0.58, 1
+    tw, th = _tsize(msg, scale, thickness, cv2.FONT_HERSHEY_DUPLEX)
+    pad, dot, gap = 16, 5, 10
+    bw = pad + dot * 2 + gap + tw + pad
+    x1 = (w - bw) // 2
+    x2 = x1 + bw
+    y2 = h - 64
+    y1 = y2 - 38
+    _panel(frame, x1, y1, x2, y2, color=(18, 16, 14), alpha=0.82, radius=19)
+    cv2.rectangle(frame, (x1, y1), (x1 + 3, y2), accent, -1)
+    cy = (y1 + y2) // 2
+    cv2.circle(frame, (x1 + pad + dot, cy), dot, accent, -1, lineType=cv2.LINE_AA)
+    _text(frame, msg, (x1 + pad + dot * 2 + gap, cy + th // 2), scale, _C_INK,
+          thickness, cv2.FONT_HERSHEY_DUPLEX, shadow=False)
+
+
+def _draw_controls(frame, state: DisplayState) -> None:
+    h, w = frame.shape[:2]
+    # "E enrolar" is only shown when the runtime was started with an enrollment
+    # target; otherwise the key is inert and the hint would be misleading.
+    text = "Q  salir      E  enrolar" if state.enroll_enabled else "Q  salir"
+    tw, _ = _tsize(text, 0.5, 1)
+    _text(frame, text, (w - tw - 16, h - 16), 0.5, _C_MUTED, 1)
+
+
 def _draw_overlay(frame, state: DisplayState, show_landmarks: bool) -> None:
     _draw_face_overlays(frame, state.face_overlays, show_landmarks=show_landmarks)
     _draw_landmarks(frame, state.landmarks)
-    _draw_gate_border(frame, state.gate_status)
-    h = frame.shape[0]
 
-    line_latency = "Latency: N/A"
-    line_fps = "FPS: N/A"
-    if state.latency_ms is not None:
-        line_latency = f"Latency: {state.latency_ms:.1f} ms"
-    if state.fps is not None:
-        line_fps = f"FPS: {state.fps:.1f}"
-
-    cv2.putText(frame, line_latency, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2)
-    cv2.putText(frame, line_fps, (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (180, 255, 180), 2)
-
+    viewfinder_color = _C_ACCENT
     if state.gate_status is not None:
-        gate = state.gate_status.upper()
-        current = bucket_instruction(state.gate_current_bucket)
-        target = bucket_instruction(state.gate_target_bucket)
-        cv2.putText(
-            frame,
-            f"Gate: {gate} | now:{current} -> target:{target}",
-            (10, 140),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (80, 255, 80),
-            2,
-        )
-        cv2.putText(
-            frame,
-            state.gate_reason,
-            (10, 166),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (160, 255, 160),
-            2,
-        )
-        cv2.putText(
-            frame,
-            f"{state.gate_progress} | {state.gate_pose}",
-            (10, 192),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.50,
-            (190, 240, 190),
-            1,
-        )
+        viewfinder_color = _GATE_COLORS.get(state.gate_status, _C_ACCENT)
+    _draw_viewfinder(frame, viewfinder_color)
 
-    cv2.putText(frame, "q: quit | e: enroll", (10, h - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+    if state.gate_status == "yellow" and state.gate_target_bucket in ("left", "right", "up", "down"):
+        _draw_direction_cue(frame, state.gate_target_bucket, viewfinder_color)
 
-    if state.message and time.time() <= state.message_until_ts:
-        cv2.putText(frame, state.message, (10, h - 44), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 128, 255), 2)
+    _draw_header(frame, state)
+    _draw_enroll_panel(frame, state)
+    _draw_toast(frame, state)
+    _draw_controls(frame, state)
 
 
 def _draw_face_overlays(frame, overlays: list[FaceOverlay], show_landmarks: bool) -> None:
@@ -1739,21 +2406,11 @@ def _draw_face_overlays(frame, overlays: list[FaceOverlay], show_landmarks: bool
         if show_landmarks:
             _draw_landmarks(frame, overlay.landmarks)
         x1, y1, x2, y2 = overlay.bbox
-        color = _proximity_color(overlay.in_range, overlay.regreet_armed)
-        y_text = max(18, y1 - 8)
-        text = overlay.label
-        if overlay.face_ratio is not None:
-            text = f"{overlay.label} [{overlay.face_ratio:.3f}]"
-        cv2.putText(
-            frame,
-            text,
-            (x1, y_text),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            color,
-            2,
-            lineType=cv2.LINE_AA,
-        )
+        color = _face_color(overlay)
+        dim = tuple(int(c * 0.55) for c in color)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), dim, 1, lineType=cv2.LINE_AA)
+        _corner_brackets(frame, (x1, y1, x2, y2), color, thickness=2)
+        _label_chip(frame, x1, y1 - 8, overlay.label, color)
 
 
 def _is_in_face_ratio_range(face_ratio: float | None, min_face_ratio: float) -> bool:
@@ -1762,25 +2419,6 @@ def _is_in_face_ratio_range(face_ratio: float | None, min_face_ratio: float) -> 
     if face_ratio is None:
         return False
     return float(face_ratio) >= float(min_face_ratio)
-
-
-def _proximity_color(in_range: bool, regreet_armed: bool) -> tuple[int, int, int]:
-    if in_range and not regreet_armed:
-        return (0, 255, 0)
-    return (0, 0, 255)
-
-
-def _draw_gate_border(frame, gate_status: str | None) -> None:
-    if gate_status is None:
-        return
-    h, w = frame.shape[:2]
-    color_map = {
-        "red": (0, 0, 255),
-        "yellow": (0, 220, 255),
-        "green": (0, 200, 0),
-    }
-    color = color_map.get(gate_status, (180, 180, 180))
-    cv2.rectangle(frame, (2, 2), (w - 3, h - 3), color, 3, lineType=cv2.LINE_AA)
 
 
 def _update_landmarks(frame, services, state: DisplayState, requested_points: int) -> None:

@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 
 from eleccia_vision.domain.interfaces import FaceEncoder
+from eleccia_vision.quiet_startup import suppress_native_stdout
 
 
 @dataclass(frozen=True)
@@ -40,8 +41,9 @@ class InsightFaceEncoder(FaceEncoder):
 
             factory = FaceAnalysis
 
-        self._app = factory(name=model_name, providers=self._providers)
-        self._app.prepare(ctx_id=ctx_id, det_size=det_size)
+        with suppress_native_stdout():
+            self._app = factory(name=model_name, providers=self._providers)
+            self._app.prepare(ctx_id=ctx_id, det_size=det_size)
 
     def encode(self, image_bytes: bytes) -> list[float]:
         image = _decode_image(image_bytes)

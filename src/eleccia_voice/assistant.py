@@ -21,7 +21,7 @@ from eleccia_vision.domain.entities import RecognitionResult
 PersonMetadataResolver = Callable[[str], tuple[str, str | None]]
 KNOWN_PRESENCE_ID = "__known_presence__"
 UNKNOWN_PRESENCE_ID = "__unknown_presence__"
-DEFAULT_UNKNOWN_GREETING = "Hola, bienvenido al laboratorio de IA"
+DEFAULT_UNKNOWN_GREETING = "Hola, bienvenido al laboratorio de IA, Eleccia"
 
 
 @dataclass(frozen=True)
@@ -45,6 +45,7 @@ class VoiceSettings:
     melo_speaker: str | None = None
     melo_speed: float | None = None
     melo_device: str | None = None
+    greet_unknown: bool = True
     unknown_greeting: str = DEFAULT_UNKNOWN_GREETING
     min_face_ratio_for_greeting: float = 0.0
 
@@ -167,12 +168,16 @@ class VoiceAssistant:
             return None
 
         if _is_unknown_face_detected(result, face_ratio=face_ratio) and close_enough:
+            if not self._settings.greet_unknown:
+                return None
             # If we were tracking a known person, unknown frames should not replace
             # that presence immediately; let absence timeout handle the reset.
             if current_known_person_id is not None:
                 pass
             else:
-                unknown_presence_key = _build_unknown_presence_key(presence_id)
+                # Unknown visitors are handled as one group: greet once while at
+                # least one unknown face remains present, then reset by absence.
+                unknown_presence_key = UNKNOWN_PRESENCE_ID
                 self._state.unknown_presence_last_seen_ts[unknown_presence_key] = ts
                 greeted = self._state.unknown_presence_greeted.get(unknown_presence_key, False)
 
@@ -286,6 +291,7 @@ def build_voice_settings_from_args(args: Any) -> VoiceSettings:
         melo_speaker=getattr(args, "melo_speaker", None),
         melo_speed=getattr(args, "melo_speed", None),
         melo_device=getattr(args, "melo_device", None),
+        greet_unknown=bool(getattr(args, "voice_greet_unknown", True)),
         min_face_ratio_for_greeting=max(0.0, float(getattr(args, "voice_min_face_ratio", 0.0))),
     )
 

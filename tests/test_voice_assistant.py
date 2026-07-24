@@ -33,12 +33,12 @@ def test_resolve_welcome_word_variants() -> None:
 
 def test_format_voice_message_uses_welcome_token() -> None:
     text = format_voice_message(
-        template="Hola {name}, {welcome} al laboratorio de IA",
+        template="Hola {name}, {welcome} al laboratorio de IA, Eleccia",
         name="Ana",
         person_id="ana01",
         sex="female",
     )
-    assert text == "Hola Ana, bienvenida al laboratorio de IA"
+    assert text == "Hola Ana, bienvenida al laboratorio de IA, Eleccia"
 
 
 def test_voice_assistant_warning_is_emitted_once_when_backend_missing() -> None:
@@ -71,7 +71,7 @@ def test_voice_assistant_unknown_person_greeting() -> None:
         VoiceSettings(
             enabled=True,
             backend="unsupported-backend",
-            unknown_greeting="Hola, bienvenido al laboratorio de IA",
+            unknown_greeting="Hola, bienvenido al laboratorio de IA, Eleccia",
         )
     )
     assistant._backend = SimpleNamespace(kind="stub", engine=None)
@@ -97,8 +97,40 @@ def test_voice_assistant_unknown_person_greeting() -> None:
         )
     assistant.close()
 
-    assert msg1 == "Saludo: Hola, bienvenido al laboratorio de IA"
+    assert msg1 == "Saludo: Hola, bienvenido al laboratorio de IA, Eleccia"
     assert msg2 is None
+
+
+def test_voice_assistant_unknown_greeting_can_be_disabled() -> None:
+    assistant = VoiceAssistant(
+        VoiceSettings(
+            enabled=True,
+            backend="unsupported-backend",
+            greet_unknown=False,
+            unknown_greeting="Hola, bienvenido al laboratorio de IA, Eleccia",
+        )
+    )
+    assistant._backend = SimpleNamespace(kind="stub", engine=None)
+
+    unknown = RecognitionResult(
+        decision="unknown_person",
+        matched=False,
+        person_id=None,
+        top1=RecognitionCandidate(person_id="known_ref", score=0.42),
+        top2=None,
+    )
+
+    with patch("eleccia_voice.assistant._speak_message", return_value=True) as speak:
+        msg = assistant.on_recognition(
+            unknown,
+            resolve_person=lambda _person_id: ("", None),
+            face_ratio=0.12,
+            now=10.0,
+        )
+    assistant.close()
+
+    assert msg is None
+    speak.assert_not_called()
 
 
 def test_voice_assistant_unknown_without_candidates_but_face_ratio_greets() -> None:
@@ -106,7 +138,7 @@ def test_voice_assistant_unknown_without_candidates_but_face_ratio_greets() -> N
         VoiceSettings(
             enabled=True,
             backend="unsupported-backend",
-            unknown_greeting="Hola, bienvenido al laboratorio de IA",
+            unknown_greeting="Hola, bienvenido al laboratorio de IA, Eleccia",
         )
     )
     assistant._backend = SimpleNamespace(kind="stub", engine=None)
@@ -128,7 +160,7 @@ def test_voice_assistant_unknown_without_candidates_but_face_ratio_greets() -> N
         )
     assistant.close()
 
-    assert msg == "Saludo: Hola, bienvenido al laboratorio de IA"
+    assert msg == "Saludo: Hola, bienvenido al laboratorio de IA, Eleccia"
 
 
 def test_voice_assistant_proximity_filter_blocks_far_face() -> None:
@@ -262,7 +294,7 @@ def test_voice_assistant_unknown_after_known_starts_absence_counter() -> None:
             enabled=True,
             backend="unsupported-backend",
             template="Hola {name}",
-            unknown_greeting="Hola, bienvenido al laboratorio de IA",
+            unknown_greeting="Hola, bienvenido al laboratorio de IA, Eleccia",
             absence_seconds=1.0,
             reentry_delay_seconds=0.0,
         )
@@ -301,12 +333,12 @@ def test_voice_assistant_unknown_after_known_starts_absence_counter() -> None:
     assert msg3 == "Saludo: Hola Alice Doe"
 
 
-def test_voice_assistant_unknown_is_tracked_independently_per_presence_id() -> None:
+def test_voice_assistant_unknowns_share_group_greeting_until_absent() -> None:
     assistant = VoiceAssistant(
         VoiceSettings(
             enabled=True,
             backend="unsupported-backend",
-            unknown_greeting="Hola, bienvenido al laboratorio de IA",
+            unknown_greeting="Hola, bienvenido al laboratorio de IA, Eleccia",
             absence_seconds=1.0,
             reentry_delay_seconds=0.0,
         )
@@ -342,11 +374,19 @@ def test_voice_assistant_unknown_is_tracked_independently_per_presence_id() -> N
             now=40.2,
             presence_id="track-b",
         )
+        msg4 = assistant.on_recognition(
+            unknown,
+            resolve_person=lambda _person_id: ("", None),
+            face_ratio=0.12,
+            now=41.4,
+            presence_id="track-c",
+        )
     assistant.close()
 
-    assert msg1 == "Saludo: Hola, bienvenido al laboratorio de IA"
+    assert msg1 == "Saludo: Hola, bienvenido al laboratorio de IA, Eleccia"
     assert msg2 is None
-    assert msg3 == "Saludo: Hola, bienvenido al laboratorio de IA"
+    assert msg3 is None
+    assert msg4 == "Saludo: Hola, bienvenido al laboratorio de IA, Eleccia"
 
 
 def test_voice_assistant_known_is_tracked_independently_per_presence_id() -> None:
