@@ -43,13 +43,14 @@ Config relevante en `.env`:
 - `ELECCIA_LISTEN_ENABLED=true` habilita listener de comandos
 - `ELECCIA_MQTT_ENABLED=true` habilita publish de intents al broker MQTT
 - `ELECCIA_MQTT_HOST`, `ELECCIA_MQTT_PORT`, `ELECCIA_MQTT_TOPIC_PREFIX`, `ELECCIA_MQTT_QOS`, `ELECCIA_MQTT_RETAIN`
-- `ELECCIA_LISTEN_BACKEND=stdin|whisper|openwakeword_whisper`
+- `ELECCIA_LISTEN_BACKEND=stdin|whisper|openwakeword_whisper|gemma4`
 - `ELECCIA_LISTEN_WAKE_WORD=eleccia`
 - `ELECCIA_LISTEN_WAKE_WORD_ALIASES=elexia,eleksia,elecia`
 - `ELECCIA_LISTEN_WAKE_WORD_FUZZY_THRESHOLD=0.80`
 - `ELECCIA_LISTEN_REQUIRE_WAKE_WORD=true`
 - `ELECCIA_LISTEN_WAKE_COMMAND_WINDOW_SECONDS=6.0`
 - Whisper config: `ELECCIA_LISTEN_WHISPER_*` (ver `.env.example`)
+- Gemma4 config: `ELECCIA_LISTEN_GEMMA4_*` (ver `.env.example`)
 - openWakeWord config: `ELECCIA_LISTEN_OPENWAKEWORD_*` (ver `.env.example`)
 - Mutex global de audio: `ELECCIA_AUDIO_LOCK_FILE`, `ELECCIA_AUDIO_LOCK_STRICT`, `ELECCIA_AUDIO_LOCK_TIMEOUT_SECONDS`
 - Prefijo `ELECCIA_*`: usado por `eleccia_core` y por `scripts/run_vision_runtime.py`
@@ -100,6 +101,17 @@ python3 scripts/test_stt_whisper.py \
   --whisper-compute-type float16 \
   --whisper-language es \
   --whisper-vad-filter
+```
+
+Prueba standalone (Gemma4 + transformers):
+
+```bash
+python3 scripts/test_stt_whisper.py \
+  --backend gemma4 \
+  --gemma4-model google/gemma-4-E2B-it \
+  --gemma4-device-map auto \
+  --gemma4-torch-dtype bfloat16 \
+  --gemma4-sample-rate-hz 16000
 ```
 
 ## Config fija para runtime (.env)

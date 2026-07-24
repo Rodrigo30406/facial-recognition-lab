@@ -78,13 +78,14 @@ Bus MQTT (opcional):
 Listener de comandos:
 
 - `ELECCIA_LISTEN_ENABLED=true`
-- `ELECCIA_LISTEN_BACKEND=stdin|whisper|openwakeword_whisper`
+- `ELECCIA_LISTEN_BACKEND=stdin|whisper|openwakeword_whisper|gemma4`
 - `ELECCIA_LISTEN_WAKE_WORD=eleccia`
 - `ELECCIA_LISTEN_WAKE_WORD_ALIASES=elexia,eleksia,elecia`
 - `ELECCIA_LISTEN_WAKE_WORD_FUZZY_THRESHOLD=0.80`
 - `ELECCIA_LISTEN_REQUIRE_WAKE_WORD=true`
 - `ELECCIA_LISTEN_WAKE_COMMAND_WINDOW_SECONDS=6.0`
 - `ELECCIA_LISTEN_STDIN_PROMPT="eleccia> "`
+- `ELECCIA_LISTEN_GEMMA4_*` para backend `gemma4` via `transformers`
 
 Voz a texto (STT) recomendada:
 
@@ -130,6 +131,23 @@ Instalacion de wakeword:
 
 ```bash
 pip install openwakeword
+```
+
+Demo Gemma4 (audio->texto con transformers):
+
+```bash
+python3 scripts/test_stt_whisper.py \
+  --backend gemma4 \
+  --gemma4-model google/gemma-4-E2B-it \
+  --gemma4-device-map auto \
+  --gemma4-torch-dtype bfloat16 \
+  --gemma4-sample-rate-hz 16000
+```
+
+Dependencias para backend `gemma4`:
+
+```bash
+pip install "transformers>=4.57.0" accelerate
 ```
 
 La consistencia temporal se puede ajustar con `ELECCIA_TEMPORAL_CONSISTENCY_ENABLED` y `ELECCIA_TEMPORAL_MIN_CONSISTENT_FRAMES`.
