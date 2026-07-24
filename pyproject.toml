@@ -18,6 +18,8 @@ dependencies = [
   "sounddevice",
   "faster-whisper",
   "openwakeword",
+  "transformers>=4.57.0",
+  "accelerate",
   "melotts @ git+https://github.com/myshell-ai/MeloTTS.git",
   "pydantic>=2",
   "numpy<2.0",

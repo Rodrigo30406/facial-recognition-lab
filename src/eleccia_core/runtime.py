@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
+from urllib.parse import quote
 
 from eleccia_listen import CommandEvent, ElecciaListenService, ListenSettings
 from eleccia_mqtt import ElecciaMqttService, MqttSettings
@@ -45,6 +47,18 @@ class RuntimeSettings:
     listen_whisper_silence_stop_seconds: float = 2.0
     listen_whisper_max_utterance_seconds: float = 8.0
     listen_whisper_pre_roll_seconds: float = 0.3
+    listen_gemma4_model: str = "google/gemma-4-E2B-it"
+    listen_gemma4_device_map: str = "auto"
+    listen_gemma4_torch_dtype: str = "bfloat16"
+    listen_gemma4_attn_implementation: str = "sdpa"
+    listen_gemma4_max_new_tokens: int = 96
+    listen_gemma4_sample_rate_hz: int = 16000
+    listen_gemma4_chunk_seconds: float = 6.0
+    listen_gemma4_min_rms: float = 0.003
+    listen_gemma4_transcribe_prompt: str = (
+        "Transcribe exactamente el audio en espanol. "
+        "Responde solo con la transcripcion, sin explicaciones."
+    )
     listen_debug_timing: bool = False
     listen_noise_filter_enabled: bool = False
     listen_openwakeword_model_paths: tuple[str, ...] = ()
@@ -135,6 +149,27 @@ class RuntimeSettings:
                 "ELECCIA_LISTEN_WHISPER_PRE_ROLL_SECONDS",
                 0.3,
                 file_values,
+            ),
+            listen_gemma4_model=(
+                _env_lookup("ELECCIA_LISTEN_GEMMA4_MODEL", file_values) or "google/gemma-4-E2B-it"
+            ),
+            listen_gemma4_device_map=(
+                _env_lookup("ELECCIA_LISTEN_GEMMA4_DEVICE_MAP", file_values) or "auto"
+            ),
+            listen_gemma4_torch_dtype=(
+                _env_lookup("ELECCIA_LISTEN_GEMMA4_TORCH_DTYPE", file_values) or "bfloat16"
+            ),
+            listen_gemma4_attn_implementation=(
+                _env_lookup("ELECCIA_LISTEN_GEMMA4_ATTN_IMPLEMENTATION", file_values) or "sdpa"
+            ),
+            listen_gemma4_max_new_tokens=_env_int("ELECCIA_LISTEN_GEMMA4_MAX_NEW_TOKENS", 96, file_values),
+            listen_gemma4_sample_rate_hz=_env_int("ELECCIA_LISTEN_GEMMA4_SAMPLE_RATE_HZ", 16000, file_values),
+            listen_gemma4_chunk_seconds=_env_float("ELECCIA_LISTEN_GEMMA4_CHUNK_SECONDS", 6.0, file_values),
+            listen_gemma4_min_rms=_env_float("ELECCIA_LISTEN_GEMMA4_MIN_RMS", 0.003, file_values),
+            listen_gemma4_transcribe_prompt=(
+                _env_lookup("ELECCIA_LISTEN_GEMMA4_TRANSCRIBE_PROMPT", file_values)
+                or "Transcribe exactamente el audio en espanol. "
+                "Responde solo con la transcripcion, sin explicaciones."
             ),
             listen_debug_timing=_env_bool(
                 "ELECCIA_LISTEN_DEBUG_TIMING",
@@ -329,6 +364,15 @@ class ListenModule:
             whisper_silence_stop_seconds=self._settings.listen_whisper_silence_stop_seconds,
             whisper_max_utterance_seconds=self._settings.listen_whisper_max_utterance_seconds,
             whisper_pre_roll_seconds=self._settings.listen_whisper_pre_roll_seconds,
+            gemma4_model=self._settings.listen_gemma4_model,
+            gemma4_device_map=self._settings.listen_gemma4_device_map,
+            gemma4_torch_dtype=self._settings.listen_gemma4_torch_dtype,
+            gemma4_attn_implementation=self._settings.listen_gemma4_attn_implementation,
+            gemma4_max_new_tokens=self._settings.listen_gemma4_max_new_tokens,
+            gemma4_sample_rate_hz=self._settings.listen_gemma4_sample_rate_hz,
+            gemma4_chunk_seconds=self._settings.listen_gemma4_chunk_seconds,
+            gemma4_min_rms=self._settings.listen_gemma4_min_rms,
+            gemma4_transcribe_prompt=self._settings.listen_gemma4_transcribe_prompt,
             debug_timing=self._settings.listen_debug_timing,
             noise_filter_enabled=self._settings.listen_noise_filter_enabled,
             openwakeword_model_paths=self._settings.listen_openwakeword_model_paths,
@@ -489,6 +533,11 @@ class ElecciaRuntime:
 
             _apply_internal_intent(intent_name=intent, vision_module=vision_module)
 
+            if intent == "totem_on":
+                _control_totem("on")
+            elif intent == "totem_off":
+                _control_totem("off")
+
             if mqtt_module is not None:
                 mqtt_module.publish_intent(event)
 
@@ -579,6 +628,15 @@ def build_identification_runtime_for_api() -> ElecciaRuntime | None:
             listen_whisper_silence_stop_seconds=settings.listen_whisper_silence_stop_seconds,
             listen_whisper_max_utterance_seconds=settings.listen_whisper_max_utterance_seconds,
             listen_whisper_pre_roll_seconds=settings.listen_whisper_pre_roll_seconds,
+            listen_gemma4_model=settings.listen_gemma4_model,
+            listen_gemma4_device_map=settings.listen_gemma4_device_map,
+            listen_gemma4_torch_dtype=settings.listen_gemma4_torch_dtype,
+            listen_gemma4_attn_implementation=settings.listen_gemma4_attn_implementation,
+            listen_gemma4_max_new_tokens=settings.listen_gemma4_max_new_tokens,
+            listen_gemma4_sample_rate_hz=settings.listen_gemma4_sample_rate_hz,
+            listen_gemma4_chunk_seconds=settings.listen_gemma4_chunk_seconds,
+            listen_gemma4_min_rms=settings.listen_gemma4_min_rms,
+            listen_gemma4_transcribe_prompt=settings.listen_gemma4_transcribe_prompt,
             listen_debug_timing=settings.listen_debug_timing,
             listen_noise_filter_enabled=settings.listen_noise_filter_enabled,
             listen_openwakeword_model_paths=settings.listen_openwakeword_model_paths,
@@ -659,6 +717,28 @@ def _env_tuple_str(key: str, file_values: dict[str, str]) -> tuple[str, ...]:
     return tuple(part.strip() for part in raw.split(",") if part.strip())
 
 
+def _control_totem(action: str) -> None:
+    """Send an on/off signal to the totem screen listener over HTTP.
+
+    Configured via ELECCIA_TOTEM_URL (e.g. http://192.168.31.44:8090) and an
+    optional ELECCIA_TOTEM_TOKEN. No-op if the URL is not set.
+    """
+    base = os.getenv("ELECCIA_TOTEM_URL", "").strip().rstrip("/")
+    if not base:
+        print("[eleccia][totem] ELECCIA_TOTEM_URL not set; skipping")
+        return
+    url = f"{base}/{action}"
+    token = os.getenv("ELECCIA_TOTEM_TOKEN", "").strip()
+    if token:
+        url += f"?key={quote(token)}"
+    try:
+        with urllib.request.urlopen(url, timeout=4) as response:
+            response.read()
+        print(f"[eleccia][totem] {action} -> ok")
+    except Exception as exc:
+        print(f"[eleccia][totem] {action} failed: {exc}")
+
+
 def _apply_internal_intent(
     *,
     intent_name: str,
@@ -686,6 +766,10 @@ def _intent_response(intent_name: str) -> str | None:
         return "Activando la camara."
     if intent_name == "camera_off":
         return "Deteniendo la camara."
+    if intent_name == "totem_on":
+        return "Prendiendo el totem."
+    if intent_name == "totem_off":
+        return "Apagando el totem."
     if intent_name == "status":
         return "Todos los modulos operativos."
     return None

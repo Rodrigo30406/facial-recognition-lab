@@ -29,4 +29,6 @@ pyttsx3
 sounddevice
 faster-whisper
 openwakeword
+transformers>=4.57.0
+accelerate
 melotts @ git+https://github.com/myshell-ai/MeloTTS.git

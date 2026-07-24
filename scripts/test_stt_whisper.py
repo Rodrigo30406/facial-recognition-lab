@@ -19,12 +19,12 @@ from eleccia_listen import CommandEvent, ElecciaListenService, ListenSettings
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Whisper STT demo (mic -> text)")
+    parser = argparse.ArgumentParser(description="STT demo (mic -> text)")
     parser.add_argument(
         "--backend",
         type=str,
         default="whisper",
-        choices=["whisper", "stdin", "openwakeword_whisper"],
+        choices=["whisper", "stdin", "openwakeword_whisper", "gemma4"],
     )
     parser.add_argument("--wake-word", type=str, default="eleccia")
     parser.add_argument(
@@ -51,6 +51,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--whisper-sample-rate-hz", type=int, default=16000)
     parser.add_argument("--whisper-input-device-index", type=int, default=None)
     parser.add_argument("--whisper-min-rms", type=float, default=0.003)
+    parser.add_argument("--gemma4-model", type=str, default="google/gemma-4-E2B-it")
+    parser.add_argument("--gemma4-device-map", type=str, default="auto")
+    parser.add_argument("--gemma4-torch-dtype", type=str, default="bfloat16")
+    parser.add_argument("--gemma4-attn-implementation", type=str, default="sdpa")
+    parser.add_argument("--gemma4-max-new-tokens", type=int, default=96)
+    parser.add_argument("--gemma4-sample-rate-hz", type=int, default=16000)
+    parser.add_argument("--gemma4-chunk-seconds", type=float, default=6.0)
+    parser.add_argument("--gemma4-min-rms", type=float, default=0.003)
+    parser.add_argument(
+        "--gemma4-transcribe-prompt",
+        type=str,
+        default=(
+            "Transcribe exactamente el audio en espanol. "
+            "Responde solo con la transcripcion, sin explicaciones."
+        ),
+    )
     parser.add_argument(
         "--openwakeword-model-paths",
         type=str,
@@ -88,6 +104,15 @@ def main() -> int:
         whisper_sample_rate_hz=max(8000, int(args.whisper_sample_rate_hz)),
         whisper_input_device_index=args.whisper_input_device_index,
         whisper_min_rms=max(0.0, float(args.whisper_min_rms)),
+        gemma4_model=args.gemma4_model,
+        gemma4_device_map=str(args.gemma4_device_map or "auto"),
+        gemma4_torch_dtype=str(args.gemma4_torch_dtype or "bfloat16"),
+        gemma4_attn_implementation=str(args.gemma4_attn_implementation or "sdpa"),
+        gemma4_max_new_tokens=max(8, int(args.gemma4_max_new_tokens)),
+        gemma4_sample_rate_hz=max(8000, int(args.gemma4_sample_rate_hz)),
+        gemma4_chunk_seconds=max(0.5, float(args.gemma4_chunk_seconds)),
+        gemma4_min_rms=max(0.0, float(args.gemma4_min_rms)),
+        gemma4_transcribe_prompt=str(args.gemma4_transcribe_prompt or "").strip(),
         openwakeword_model_paths=tuple(
             part.strip() for part in str(args.openwakeword_model_paths).split(",") if part.strip()
         ),
@@ -118,7 +143,16 @@ def main() -> int:
 
     service.start()
     print("[stt] running. Press Ctrl+C to stop.")
-    print(f"[stt] backend={settings.backend} model={settings.whisper_model} device={settings.whisper_device}")
+    if settings.backend == "gemma4":
+        print(
+            "[stt] backend=gemma4 "
+            f"model={settings.gemma4_model} device_map={settings.gemma4_device_map}"
+        )
+    else:
+        print(
+            "[stt] backend="
+            f"{settings.backend} model={settings.whisper_model} device={settings.whisper_device}"
+        )
 
     try:
         while not should_exit:

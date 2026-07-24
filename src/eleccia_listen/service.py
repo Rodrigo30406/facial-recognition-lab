@@ -36,6 +36,18 @@ class ListenSettings:
     whisper_silence_stop_seconds: float = 2.0
     whisper_max_utterance_seconds: float = 8.0
     whisper_pre_roll_seconds: float = 0.3
+    gemma4_model: str = "google/gemma-4-E2B-it"
+    gemma4_device_map: str = "auto"
+    gemma4_torch_dtype: str = "bfloat16"
+    gemma4_attn_implementation: str = "sdpa"
+    gemma4_max_new_tokens: int = 96
+    gemma4_sample_rate_hz: int = 16000
+    gemma4_chunk_seconds: float = 6.0
+    gemma4_min_rms: float = 0.003
+    gemma4_transcribe_prompt: str = (
+        "Transcribe exactamente el audio en espanol. "
+        "Responde solo con la transcripcion, sin explicaciones."
+    )
     debug_timing: bool = False
     noise_filter_enabled: bool = False
     openwakeword_model_paths: tuple[str, ...] = ()
@@ -85,7 +97,7 @@ class ElecciaListenService:
             return
 
         backend = self._settings.backend.strip().lower()
-        if backend not in {"stdin", "whisper", "openwakeword_whisper"}:
+        if backend not in {"stdin", "whisper", "openwakeword_whisper", "gemma4"}:
             raise ValueError(f"Unsupported listen backend '{self._settings.backend}'")
 
         self._stop_event.clear()
@@ -93,6 +105,8 @@ class ElecciaListenService:
             target = self._run_stdin
         elif backend == "whisper":
             target = self._run_whisper
+        elif backend == "gemma4":
+            target = self._run_gemma4
         else:
             target = self._run_openwakeword_whisper
         self._thread = threading.Thread(target=target, name=f"eleccia-listen-{backend}", daemon=True)
@@ -148,6 +162,171 @@ class ElecciaListenService:
             self._run_whisper_endpointing(model=model, np=np, sd=sd, noise_filter=noise_filter)
             return
         self._run_whisper_chunked(model=model, np=np, sd=sd, noise_filter=noise_filter)
+
+    def _run_gemma4(self) -> None:
+        try:
+            import numpy as np
+            import sounddevice as sd
+            import torch
+            from transformers import AutoModelForImageTextToText, AutoProcessor
+        except Exception as exc:
+            print(f"[eleccia][listen] gemma4 backend unavailable: {exc}")
+            return
+
+        torch_dtype = _resolve_torch_dtype(self._settings.gemma4_torch_dtype, torch=torch)
+        if (
+            torch_dtype in {getattr(torch, "float16", None), getattr(torch, "bfloat16", None)}
+            and not bool(getattr(torch.cuda, "is_available", lambda: False)())
+        ):
+            torch_dtype = getattr(torch, "float32", torch_dtype)
+        device_map = (self._settings.gemma4_device_map or "auto").strip()
+        if not device_map:
+            device_map = "auto"
+
+        model_kwargs: dict[str, object] = {
+            "device_map": device_map,
+            "trust_remote_code": True,
+        }
+        if torch_dtype is not None:
+            model_kwargs["torch_dtype"] = torch_dtype
+        attn_impl = (self._settings.gemma4_attn_implementation or "").strip()
+        if attn_impl:
+            model_kwargs["attn_implementation"] = attn_impl
+
+        try:
+            model = AutoModelForImageTextToText.from_pretrained(
+                self._settings.gemma4_model,
+                **model_kwargs,
+            )
+            processor = AutoProcessor.from_pretrained(
+                self._settings.gemma4_model,
+                trust_remote_code=True,
+            )
+        except Exception as exc:
+            print(f"[eleccia][listen] failed to load gemma4 model '{self._settings.gemma4_model}': {exc}")
+            return
+
+        print(
+            "[eleccia][listen] gemma4 ready "
+            f"(model={self._settings.gemma4_model}, device_map={device_map})"
+        )
+        self._run_gemma4_chunked(
+            model=model,
+            processor=processor,
+            np=np,
+            sd=sd,
+            torch=torch,
+        )
+
+    def _run_gemma4_chunked(
+        self,
+        model: object,
+        processor: object,
+        np: object,
+        sd: object,
+        torch: object,
+    ) -> None:
+        chunk_seconds = max(0.5, float(self._settings.gemma4_chunk_seconds))
+        sample_rate = max(8000, int(self._settings.gemma4_sample_rate_hz))
+        n_samples = int(chunk_seconds * sample_rate)
+        min_rms = max(0.0, float(self._settings.gemma4_min_rms))
+
+        while not self._stop_event.is_set():
+            try:
+                with audio_io_lock():
+                    audio = sd.rec(
+                        n_samples,
+                        samplerate=sample_rate,
+                        channels=1,
+                        dtype="float32",
+                        device=self._settings.whisper_input_device_index,
+                    )
+                    sd.wait()
+            except Exception:
+                time.sleep(0.2)
+                continue
+
+            if self._stop_event.is_set():
+                break
+
+            waveform = np.asarray(audio, dtype=np.float32).reshape(-1)
+            if waveform.size == 0:
+                continue
+
+            rms = float(np.sqrt(np.mean(np.square(waveform))))
+            if rms < min_rms:
+                continue
+
+            started = time.perf_counter()
+            if self._settings.debug_timing:
+                print(
+                    "[eleccia][timing] gemma4_transcribe_start "
+                    f"samples={int(waveform.size)} rms={rms:.4f}"
+                )
+            text = self._gemma4_transcribe(
+                model=model,
+                processor=processor,
+                waveform=waveform,
+                sample_rate=sample_rate,
+                torch=torch,
+            )
+            if self._settings.debug_timing:
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
+                print(
+                    "[eleccia][timing] gemma4_transcribe_done "
+                    f"elapsed_ms={elapsed_ms:.1f} text_len={len(text)}"
+                )
+            if not text:
+                continue
+            self._dispatch_text(text)
+
+    def _gemma4_transcribe(
+        self,
+        *,
+        model: object,
+        processor: object,
+        waveform: object,
+        sample_rate: int,
+        torch: object,
+    ) -> str:
+        prompt = str(self._settings.gemma4_transcribe_prompt or "").strip()
+        if not prompt:
+            prompt = "Transcribe exactamente el audio. Responde solo con la transcripcion."
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio", "audio": waveform},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        try:
+            inputs = processor.apply_chat_template(
+                messages,
+                sampling_rate=sample_rate,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                add_generation_prompt=True,
+            )
+            inputs = _move_inputs_to_model_device(inputs=inputs, model=model)
+            with torch.inference_mode():
+                generated_ids = model.generate(
+                    **inputs,
+                    max_new_tokens=max(8, int(self._settings.gemma4_max_new_tokens)),
+                    do_sample=False,
+                )
+
+            prompt_tokens = int(inputs["input_ids"].shape[-1]) if "input_ids" in inputs else 0
+            if prompt_tokens > 0 and generated_ids.shape[-1] > prompt_tokens:
+                generated_ids = generated_ids[:, prompt_tokens:]
+            decoded = processor.batch_decode(generated_ids, skip_special_tokens=True)
+            text = str(decoded[0] if decoded else "").strip()
+            return _clean_transcription_text(text)
+        except Exception:
+            return ""
 
     def _run_whisper_chunked(
         self,
@@ -591,6 +770,29 @@ def parse_command_text(
         ),
     ):
         return _intent_with_wake("camera_off", 0.95, detected, matched, score)
+    if _contains_phrase(
+        clean,
+        (
+            "prende el totem",
+            "prende la pantalla",
+            "enciende el totem",
+            "enciende la pantalla",
+            "activa el totem",
+            "activa la pantalla",
+        ),
+    ):
+        return _intent_with_wake("totem_on", 0.95, detected, matched, score)
+    if _contains_phrase(
+        clean,
+        (
+            "apaga el totem",
+            "apaga la pantalla",
+            "apagar totem",
+            "apagar pantalla",
+            "apaga el panel",
+        ),
+    ):
+        return _intent_with_wake("totem_off", 0.95, detected, matched, score)
     if _contains_phrase(clean, ("estado", "status", "como estas")):
         return _intent_with_wake("status", 0.90, detected, matched, score)
     if _contains_phrase(
@@ -711,6 +913,54 @@ def _best_openwakeword_prediction(prediction: object) -> tuple[str | None, float
             best_score = score
             best_model = str(key)
     return best_model, best_score
+
+
+def _move_inputs_to_model_device(inputs: object, model: object) -> object:
+    if not isinstance(inputs, dict):
+        return inputs
+    device = getattr(model, "device", None)
+    if device is None:
+        return inputs
+
+    moved: dict[str, object] = {}
+    for key, value in inputs.items():
+        if hasattr(value, "to"):
+            try:
+                moved[key] = value.to(device)
+                continue
+            except Exception:
+                moved[key] = value
+                continue
+        moved[key] = value
+    return moved
+
+
+def _resolve_torch_dtype(dtype_raw: str, torch: object) -> object | None:
+    value = str(dtype_raw or "").strip().lower()
+    if not value:
+        return None
+
+    mapping = {
+        "float16": "float16",
+        "fp16": "float16",
+        "bfloat16": "bfloat16",
+        "bf16": "bfloat16",
+        "float32": "float32",
+        "fp32": "float32",
+        "auto": "float16",
+    }
+    attr_name = mapping.get(value)
+    if attr_name is None:
+        return None
+    return getattr(torch, attr_name, None)
+
+
+def _clean_transcription_text(text: str) -> str:
+    cleaned = str(text).strip()
+    if not cleaned:
+        return ""
+    cleaned = re.sub(r"^(assistant|transcripcion|transcript)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
 
 
 def _closest_power_of_two(value: int, min_value: int = 256, max_value: int = 4096) -> int:
