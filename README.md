@@ -87,6 +87,10 @@ Listener de comandos:
 - `ELECCIA_LISTEN_STDIN_PROMPT="eleccia> "`
 - `ELECCIA_LISTEN_GEMMA4_*` para backend `gemma4` via `transformers`
 
+Comandos de voz soportados incluyen encendido/apagado de cámara y del tótem
+(`"prende/apaga el totem"` o `"prende/apaga la pantalla"`). El tótem se controla
+por HTTP con `ELECCIA_TOTEM_URL` (y `ELECCIA_TOTEM_TOKEN` opcional).
+
 Voz a texto (STT) recomendada:
 
 - Libreria recomendada: `faster-whisper` (Whisper optimizado)
@@ -177,6 +181,27 @@ Tambien puedes fijar defaults del runtime en `.env` usando variables `ELECCIA_*`
 ```bash
 python3 scripts/run_vision_runtime.py
 ```
+
+Cámara IP (RTSP/HTTP) en lugar de USB local:
+
+```bash
+python3 scripts/run_vision_runtime.py \
+  --camera-source ip \
+  --camera-ip 192.168.1.50 \
+  --camera-user admin \
+  --camera-password changeme \
+  --camera-rtsp-path /Streaming/Channels/101
+```
+
+Equivalente por `.env` con `ELECCIA_CAMERA_SOURCE=ip` y las llaves
+`ELECCIA_CAMERA_IP/USER/PASSWORD/PORT/SCHEME/RTSP_PATH` (o `ELECCIA_CAMERA_URL`
+con la URL completa). La contraseña se codifica para la URL automáticamente y las
+credenciales se ocultan en los logs. Para USB local, ajusta la captura con
+`ELECCIA_CAMERA_WIDTH/HEIGHT/FPS`.
+
+El ruido de arranque de InsightFace/onnxruntime y las advertencias de
+`torch`/`librosa` se silencian por defecto; usa `ELECCIA_QUIET_STARTUP=0` para
+ver la salida completa (p. ej. al depurar la carga de modelos o el provider CUDA).
 
 ## Endpoints base
 
